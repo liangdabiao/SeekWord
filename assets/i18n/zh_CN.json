@@ -58,7 +58,7 @@
   "options_provider_openrouter": "OpenRouter",
   "options_provider_openai_compatible": "OpenAI 兼容",
   "options_label_base_url": "Base URL（可选）",
-  "options_placeholder_base_url": "如：https://api.openai.com/v1",
+  "options_placeholder_base_url": "如：https://api.deepseek.com/chat/completions",
   "options_label_api_key": "API Key",
   "options_placeholder_api_key": "粘贴你的密钥",
   "options_label_accent": "音标（美式/英式）",

@@ -191,6 +191,8 @@ const EDGE_TTS_CONST = {
   REFRESH_EARLY_MS: 3 * 60 * 1000,
 };
 let edgeTokenInfo = null; // { token, region, expiry }
+const EDGE_TOKEN_STORAGE_KEY = 'CC_EDGE_TTS_TOKEN';
+let _edgeTokenLoading = null; // 防并发重复请求
 function edgeBase64ToBytes(b64) { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
 function edgeBytesToBase64(u) { let bin = ''; const CH = 0x8000; for (let i = 0; i < u.length; i += CH) bin += String.fromCharCode.apply(null, u.subarray(i, i + CH)); return btoa(bin); }
 function edgeSigDate(d) { return d.toUTCString().replace(/GMT/, '').trim().toLowerCase() + ' GMT'; }
@@ -219,30 +221,55 @@ function edgeJwtExpiryMs(token) {
 }
 async function edgeGetToken(force) {
   const now = Date.now();
+  // 1) 内存缓存
   if (!force && edgeTokenInfo && now < edgeTokenInfo.expiry - EDGE_TTS_CONST.REFRESH_EARLY_MS) return edgeTokenInfo;
-  const sig = await edgeBuildSignature(EDGE_TTS_CONST.ENDPOINT_URL, new Date());
-  const traceId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())).replace(/-/g, '');
-  const res = await fetch(EDGE_TTS_CONST.ENDPOINT_URL, {
-    method: 'POST',
-    headers: {
-      'Accept-Language': 'zh-Hans',
-      'X-ClientVersion': EDGE_TTS_CONST.CLIENT_VERSION,
-      'X-UserId': EDGE_TTS_CONST.USER_ID,
-      'X-HomeGeographicRegion': EDGE_TTS_CONST.HOME_REGION,
-      'X-ClientTraceId': traceId,
-      'X-MT-Signature': sig,
-      'User-Agent': EDGE_TTS_CONST.USER_AGENT,
-      'Content-Type': 'application/json; charset=utf-8',
-    },
-    body: '',
-  });
-  if (!res.ok) throw new Error('Edge endpoint ' + res.status);
-  const data = await res.json();
-  if (!data || !data.t || !data.r) throw new Error('Edge endpoint payload invalid');
-  const expiry = edgeJwtExpiryMs(data.t) || (Date.now() + EDGE_TTS_CONST.TOKEN_TTL_MS);
-  edgeTokenInfo = { token: data.t, region: data.r, expiry };
-  return edgeTokenInfo;
+  // 2) 内存没有，尝试 storage 持久化缓存（SW 重启后免重新取）
+  if (!force && !edgeTokenInfo) {
+    try {
+      const stored = await chrome.storage.local.get(EDGE_TOKEN_STORAGE_KEY);
+      const s = stored && stored[EDGE_TOKEN_STORAGE_KEY];
+      if (s && s.token && s.region && s.expiry && now < s.expiry - EDGE_TTS_CONST.REFRESH_EARLY_MS) {
+        edgeTokenInfo = s;
+        return edgeTokenInfo;
+      }
+    } catch (e) {}
+  }
+  // 3) 防并发：复用同一个请求 Promise
+  if (_edgeTokenLoading) return _edgeTokenLoading;
+  _edgeTokenLoading = (async () => {
+    try {
+      const sig = await edgeBuildSignature(EDGE_TTS_CONST.ENDPOINT_URL, new Date());
+      const traceId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())).replace(/-/g, '');
+      const res = await fetch(EDGE_TTS_CONST.ENDPOINT_URL, {
+        method: 'POST',
+        headers: {
+          'Accept-Language': 'zh-Hans',
+          'X-ClientVersion': EDGE_TTS_CONST.CLIENT_VERSION,
+          'X-UserId': EDGE_TTS_CONST.USER_ID,
+          'X-HomeGeographicRegion': EDGE_TTS_CONST.HOME_REGION,
+          'X-ClientTraceId': traceId,
+          'X-MT-Signature': sig,
+          'User-Agent': EDGE_TTS_CONST.USER_AGENT,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: '',
+      });
+      if (!res.ok) throw new Error('Edge endpoint ' + res.status);
+      const data = await res.json();
+      if (!data || !data.t || !data.r) throw new Error('Edge endpoint payload invalid');
+      const expiry = edgeJwtExpiryMs(data.t) || (Date.now() + EDGE_TTS_CONST.TOKEN_TTL_MS);
+      edgeTokenInfo = { token: data.t, region: data.r, expiry };
+      // 4) 持久化到 storage，SW 重启后可用
+      try { await chrome.storage.local.set({ [EDGE_TOKEN_STORAGE_KEY]: edgeTokenInfo }); } catch (e) {}
+      return edgeTokenInfo;
+    } finally {
+      _edgeTokenLoading = null;
+    }
+  })();
+  return _edgeTokenLoading;
 }
+
+
 function edgeEscapeXml(t) {
   return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
@@ -1462,3 +1489,5 @@ try {
   });
 } catch {}
 
+// ===== Edge TTS 冷启动优化：SW 激活即预取 token，用户点喇叭时已就绪 =====
+try { edgeGetToken().catch(() => {}); } catch (e) {}

@@ -177,7 +177,7 @@
     "message": "Base URL（可选）"
   },
   "options_placeholder_base_url": {
-    "message": "如：https://api.openai.com/v1"
+    "message": "如：https://api.deepseek.com/chat/completions"
   },
   "options_label_api_key": {
     "message": "API Key"

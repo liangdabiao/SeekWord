@@ -170,15 +170,25 @@
     return uk ? 'en-GB-SoniaNeural' : 'en-US-AriaNeural';
   }
 
-  // Speak via background Edge TTS; fall back to system voices on any error.
+  // Speak via background Edge TTS; fall back to system voices on any error or timeout.
   function edgeSpeak(text, opts) {
     return new Promise((resolve) => {
       const fallback = () => { systemSpeak(text, opts).then(() => resolve()); };
       if (!isEdgeSupported()) { fallback(); return; }
       const voice = pickEdgeVoice(opts.lang, opts.accent);
       const rate = typeof opts.rate === 'number' ? opts.rate : 1;
+      let settled = false;
+      // 冷启动优化：Edge TTS 3 秒未返回则自动回退浏览器语音，避免用户长时间等待
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        fallback();
+      }, 3000);
       try {
         chrome.runtime.sendMessage({ type: 'CC_EDGE_TTS', text: String(text || ''), voice, rate }, (r) => {
+          if (settled) return; // 已超时回退，忽略迟到的响应
+          clearTimeout(timer);
+          settled = true;
           if (chrome.runtime.lastError || !r || !r.ok || !r.audioBase64) { fallback(); return; }
           try {
             const audio = new Audio('data:' + (r.contentType || 'audio/mpeg') + ';base64,' + r.audioBase64);
@@ -192,7 +202,7 @@
             audio.play().catch(() => { fallback(); });
           } catch (e) { fallback(); }
         });
-      } catch (e) { fallback(); }
+      } catch (e) { clearTimeout(timer); fallback(); }
     });
   }
 

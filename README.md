@@ -3,6 +3,12 @@
 </h1>
 
 <p align="center">
+  <a href="https://github.com/liangdabiao/SeekWord"> 
+    <img src="icon.png?raw=true" alt="SeekWord Icon" title="SeekWord Icon" width="250">
+  </a>
+</p>
+
+<p align="center">
  <b>简体中文</b> | <a href="README.en.md">English</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a>
 </p>
 
@@ -90,14 +96,19 @@ AI 先对生词做初筛（只挑真正值得学的），你在面板中微调�
 ---
 
 ## ⚙️ 使用方法
-1. 安装：
- 
-- 开发：Chrome → `chrome://extensions` → 打开“开发者模式” → “加载已解压的扩展程序” → 选择本仓库目录。（请先 git clone https://github.com/liangdabiao/SeekWord.git）
+1. 安装（**推荐「加载已解压」方式，100% 成功**）：
 
-- **手动安装 .crx（无需编译）**：项目根目录已提供 `CaptiPrep-main.crx`，直接拖入浏览器即可安装：
-  - **Chrome 浏览器**：地址栏输入 `chrome://extensions` 回车 → 右上角开启「开发者模式」→ 将 `CaptiPrep-main.crx` 文件拖入页面 → 弹窗点击「添加扩展程序」（若提示"未通过 Chrome 网上应用店验证"，点击仍要启用即可）
-  - **Edge 浏览器**：地址栏输入 `edge://extensions` 回车 → 左下角开启「开发人员模式」→ 将 `CaptiPrep-main.crx` 拖入页面 → 点击「添加扩展」
-  - **备选方案**：若 Chrome 严格模式阻止 .crx 安装，可将 `CaptiPrep-main.crx` 重命名为 `.zip` 解压，再用「加载已解压的扩展程序」选择解压目录。
+- **方式一（推荐）：加载已解压的扩展程序**
+  - Chrome：地址栏输入 `chrome://extensions` 回车 → 右上角开启「开发者模式」→ 点击「加载已解压的扩展程序」→ 选择本项目根目录（`CaptiPrep-main` 文件夹）。
+  - Edge：地址栏输入 `edge://extensions` 回车 → 左下角开启「开发人员模式」→ 点击「加载解压缩的扩展」→ 选择本项目根目录。
+  - 首次使用请先 `git clone https://github.com/liangdabiao/SeekWord.git`，或下载 ZIP 解压后选择解压目录。
+
+- **方式二：手动安装 .crx**（项目根目录提供 `CaptiPrep-main.crx`）
+  - ⚠️ **CRX 有浏览器签名绑定**：Chrome 打包的 CRX 给 Edge 用会报 `CRX_REQUIRED_PROOF_MISSING`（包无效），反之亦然——**哪个浏览器用，就用哪个浏览器重新打包**。
+  - Chrome：`chrome://extensions` → 开发者模式 → 将 `CaptiPrep-main.crx` 拖入页面 → 「添加扩展程序」（若提示"未通过 Chrome 网上应用店验证"，点击仍要启用即可）。
+  - Edge：`edge://extensions` → 开发人员模式 → 将 `CaptiPrep-main.crx` 拖入页面 → 「添加扩展」。
+  - **若报 `CRX_REQUIRED_PROOF_MISSING` / "包无效"**：改用方式一（加载已解压），或用当前浏览器重新打包（扩展页 → 「打包扩展」→ 选项目根目录，私钥首次留空自动生成，以后复用同一个 `.pem`）。
+  - 备选：将 `.crx` 重命名为 `.zip` 解压，再用方式一加载解压目录。
 
 2. **视频**：打开任意带字幕的 YouTube 视频，点击扩展图标。
 3. **文章**：打开任意英文网页，点击扩展图标或右键“用捕获生词学习本页”，自动提取正文。
