@@ -9,7 +9,7 @@
 <p align="center"><em>先用任意英文内容预习生词，再带着上下文去阅读/观看——学得更快、记得更牢。</em></p>
 
 **捕获生词（SeekWord = seek + word，寻找生词）。** 它的目标是“用任何英文内容学语言”。无论是 YouTube 字幕、任意网页文章、划选的一段文字，还是自己粘贴的文本，捕获生词都会在正式阅读/观看之前，先把生词与表达**自动捕获**成学习卡片；完成预习后再回到原文，借助真实上下文强化记忆。这样的 Contextual learning（基于上下文情境的学习）能事半功倍，让学习变得有趣且“无痛”。
-本项目继承自 ：https://github.com/liangdabiao/SeekWord ,但是大幅度修改和增强功能，相信更适合初学者和进修者！
+本项目继承自 ：https://github.com/jeanchristophe13v/CaptiPrep ,但是大幅度修改和增强功能，相信更适合初学者和进修者！
 
 ## 🤔 能做什么？
 ### 1｜多来源内容捕获
@@ -206,6 +206,6 @@ https://github.com/devhims/youtube-caption-extractor
 
 ## 特别致谢
 
-本项目继承自 ：https://github.com/liangdabiao/SeekWord ，感谢作者,
+本项目继承自 ：https://github.com/jeanchristophe13v/CaptiPrep ，感谢作者,
 本项目学习了：https://github.com/mengxi-ream/read-frog ，感谢作者,
 特别感谢社区支持： https://linux.do 
