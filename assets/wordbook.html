@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__MSG_wordbook_title__</title>
+  <link rel="stylesheet" href="cc.css" />
+  <style>
+    body { margin:0; background: linear-gradient(180deg,#FFF8E7 0%,#EAF7FF 100%); font-family: 'Fredoka','Baloo 2','Segoe UI',ui-rounded,'Comic Sans MS','PingFang SC','Microsoft YaHei',sans-serif; color:#3B3B3B; }
+    .wb { display:flex; height:100vh; }
+    .wb-left { width:220px; padding:16px 12px; display:flex; flex-direction:column; gap:12px; background: rgba(255,255,255,.75); border-right:2px solid #F0E9FA; }
+    /* Center nav buttons vertically within the sidebar */
+    .wb-nav { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+    .wb-nav button { text-align:left; }
+    /* Brand: large logo stacked above title */
+    .wb-left .brand { display:flex; flex-direction:column; align-items:center; gap:10px; font-weight:800; }
+    .wb-left .brand .logo { width:min(160px, 80%); aspect-ratio:1/1; background:url(../icon.png) center/contain no-repeat; }
+    .wb-left .brand .logo + span { display:block; font-size:20px; line-height:1.1; text-align:center; }
+    .wb-nav .active { background:#58CC02; color:#fff; border-color:#3B9A02; }
+
+    .wb-right { flex:1; display:flex; flex-direction:column; }
+    .wb-toolbar { padding:12px;display:flex; justify-content:flex-end; align-items:center; gap:12px; position:relative; background: rgba(255,255,255,.7); border-bottom:2px solid #F0E9FA; }
+    .wb-title { font-weight:800; letter-spacing:.4px; font-size:18px; position:absolute; left:50%; transform: translateX(-50%); text-align:center; }
+    .wb-actions { display:flex; gap:8px; }
+
+    /* 通用化：来源过滤 */
+    .wb-src { display:flex; gap:6px; margin-right:auto; flex-wrap:wrap; }
+    .wb-src button { font-size:12px; padding:6px 10px; }
+    .wb-src .active { background:#58CC02; color:#fff; border-color:#3B9A02; }
+
+    .wb-content { flex:1; overflow:auto; padding:16px; }
+    .wb-section { margin-bottom:18px; }
+    .wb-date { font-weight:800; margin:8px 0; opacity:.8; }
+
+    /* Three cards per row on common widths; slightly larger */
+    .wb-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap:12px; }
+
+    .wb-vcard { position:relative; border:2px solid #E8E4F0; border-radius:14px; background:#fff; display:flex; padding:0; overflow:hidden; box-shadow:0 4px 12px rgba(90,80,140,.10); transition: transform .16s ease, box-shadow .16s ease; }
+    .wb-vcard:hover { transform: translateY(-2px); box-shadow:0 8px 18px rgba(90,80,140,.18); }
+    .wb-vcard .left { width:68%; border-right:2px solid #E8E4F0; display:flex; flex-direction:column; }
+    .wb-vcard .cover { width:100%; aspect-ratio: 16/9; background:#F0F4FF; overflow:hidden; }
+    .wb-vcard .cover img { width:100%; height:100%; object-fit:cover; display:block; }
+    .wb-vcard .title { padding:12px 14px; font-weight:700; line-height:1.3; font-size:18px; }
+    .wb-vcard .title.center { text-align:center; }
+    .wb-vcard .right { width:32%; position:relative; padding:12px; }
+    /* Leave space at top so right-side words don't sit under icons */
+    .wb-vcard .terms { position:absolute; inset:52px 12px 12px 12px; overflow:hidden; }
+    .wb-vcard .terms .fade { position:absolute; left:0; right:0; bottom:0; height:40%; background: linear-gradient(180deg, rgba(255,255,255,0) 0%, #fff 70%); pointer-events:none; }
+    .wb-vcard .term-item { font-size:14px; line-height:1.6; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+    /* Place select button to the left of the heart (both on right) */
+    /* Action icons at card's top-right */
+    .wb-vcard .chk { position:absolute; top:8px; right:52px; left:auto; z-index:2; }
+    .wb-vcard .fav { position:absolute; top:8px; right:8px; z-index:2; }
+    .wb-icon { width:32px; height:32px; border-radius:50%; background:#fff; border:2px solid #3BB2F5; display:grid; place-items:center; box-shadow:0 3px 0 #D6ECFF; cursor:pointer; transition: transform .14s ease, box-shadow .14s ease; }
+    .wb-icon:hover { transform: translateY(-2px); box-shadow:0 5px 10px rgba(59,178,245,.3); }
+    .wb-icon.active { background:#FF7EB6; border-color:#FF7EB6; color:#fff; box-shadow:0 3px 0 #E85D9A; }
+    .wb-icon.select.active { background:#58CC02; border-color:#58CC02; color:#fff; box-shadow:0 3px 0 #3B9A02; }
+    .wb-vcard.selected { outline:3px solid #58CC02; }
+    /* Selection icon on word cards */
+    .cc-card .chk { position:absolute; top:8px; right:8px; z-index:2; }
+
+    .fade-wrap { position:relative; }
+    .fade-pane { transition: opacity .2s ease, transform .2s ease; }
+    .fade-pane.enter { opacity:0; transform: translateY(6px); }
+    .fade-pane.enter-active { opacity:1; transform:none; }
+
+    /* Detail modal (复用 cc.css 变量) */
+    .wb-overlay { position:fixed; inset:0; background: rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:9999; }
+    .wb-modal { position:relative; width:min(1080px, 96vw); height:min(760px, 94vh); background: linear-gradient(175deg,#fff 0%,#FFF9EC 55%,#F0F9FF 100%); border:2px solid #F0E9FA; border-radius:18px; box-shadow:0 24px 60px rgba(70,50,120,.30); display:flex; flex-direction:column; }
+    .wb-m-header { padding:12px 16px; border-bottom:2px solid #EAF2FF; border-radius:18px 18px 0 0; background: linear-gradient(90deg,#58CC02 0%,#7BD33E 45%,#3BB2F5 100%); display:flex; align-items:center; justify-content:space-between; }
+    .wb-m-title { flex:1; text-align:center; font-weight:800; font-size:20px; color:#fff; text-shadow:0 1px 0 rgba(0,0,0,.12); }
+    .wb-m-body { flex:1; overflow:auto; padding:12px 12px 74px; }
+    /* Make the opened video cover slightly smaller and centered */
+    .wb-m-cover { width:84%; max-width: 980px; margin: 0 auto; aspect-ratio:16/9; background:#F0F4FF; overflow:hidden; border-radius:12px; }
+    .wb-m-cover img { width:100%; height:100%; object-fit:cover; display:block; }
+
+    /* Slightly narrower word cards */
+    .wb-card-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap:12px; margin-top:12px; }
+
+    .wb-bottom { position:absolute; left:50%; bottom:12px; transform: translateX(-50%); display:flex; gap:12px; }
+
+    .cc-ok { outline: 3px solid #58CC02; }
+  </style>
+</head>
+<body>
+  <div class="wb">
+    <div class="wb-left">
+      <div class="brand"><span class="logo"></span><span>捕获生词</span></div>
+      <div class="wb-nav">
+        <button class="cc-btn-white" data-tab="history">__MSG_wordbook_nav_history__</button>
+        <button class="cc-btn-white" data-tab="favVideos">__MSG_wordbook_nav_fav_videos__</button>
+        <button class="cc-btn-white" data-tab="favWords">__MSG_wordbook_nav_fav_words__</button>
+      </div>
+    </div>
+    <div class="wb-right">
+      <div class="wb-toolbar">
+        <div class="wb-src">
+          <button class="cc-btn-white active" data-src="all">__MSG_src_all__</button>
+          <button class="cc-btn-white" data-src="youtube">__MSG_src_youtube__</button>
+          <button class="cc-btn-white" data-src="article">__MSG_src_article__</button>
+          <button class="cc-btn-white" data-src="selection">__MSG_src_selection__</button>
+          <button class="cc-btn-white" data-src="manual">__MSG_src_manual__</button>
+        </div>
+        <div class="wb-title" id="wb-current-title">__MSG_wordbook_nav_history__</div>
+        <div class="wb-actions">
+          <button class="cc-btn-white" id="wb-select-all">__MSG_wordbook_toolbar_select_all__</button>
+          <button class="cc-btn-white" id="wb-delete">__MSG_wordbook_toolbar_delete__</button>
+          <button class="cc-btn-white" id="wb-export">__MSG_wordbook_toolbar_export__</button>
+        </div>
+      </div>
+      <div class="wb-content fade-wrap">
+        <div id="wb-pane" class="fade-pane"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Detail modal -->
+  <div class="wb-overlay" id="wb-overlay" aria-hidden="true">
+    <div class="wb-modal" role="dialog" aria-modal="true">
+      <div class="wb-m-header">
+        <button class="cc-mini-btn" id="wb-close" aria-label="__MSG_action_close__">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+        <div class="wb-m-title" id="wb-m-title"></div>
+        <span style="width:46px"></span>
+      </div>
+      <div class="wb-m-body">
+        <div class="wb-m-cover"><img id="wb-m-img" alt="__MSG_alt_cover__" /></div>
+        <div class="wb-card-grid" id="wb-card-grid"></div>
+      </div>
+      <!-- bottom controls for big card preview inside modal -->
+      <div class="wb-bottom" id="wb-bottom" style="display:none">
+        <button class="cc-mini-btn" id="wb-prev" aria-label="__MSG_action_previous__">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb-fav-word" aria-label="__MSG_action_favorite__">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb-edit" aria-label="__MSG_action_edit__">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb-save" aria-label="__MSG_action_save__" disabled>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb-next" aria-label="__MSG_action_next__">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Word detail modal (overlay above video detail) -->
+  <div class="wb-overlay" id="wb-overlay-card" aria-hidden="true">
+    <div class="wb-modal" role="dialog" aria-modal="true">
+      <div class="wb-m-header">
+        <button class="cc-mini-btn" id="wb2-close" aria-label="__MSG_action_close__">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+        <div class="wb-m-title" id="wb2-m-title"></div>
+        <span style="width:46px"></span>
+      </div>
+      <div class="wb-m-body">
+        <div id="wb2-big"></div>
+      </div>
+      <div class="wb-bottom" id="wb2-bottom" style="display:none">
+        <button class="cc-mini-btn" id="wb2-prev" aria-label="__MSG_action_previous__">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb2-fav-word" aria-label="__MSG_action_favorite__">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb2-edit" aria-label="__MSG_action_edit__">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb2-save" aria-label="__MSG_action_save__" disabled>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
+        <button class="cc-mini-btn" id="wb2-next" aria-label="__MSG_action_next__">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="tts.js"></script>
+  <script src="wordbook.js" type="module"></script>
+</body>
+</html>

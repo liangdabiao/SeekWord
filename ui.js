@@ -1,0 +1,1570 @@
+// UI script: handles DOM, user interactions, and rendering. Uses backend via global 捕获生词.backend
+var __i18nDict = null;
+function t(k, ...subs) {
+  try {
+    if (__i18nDict && __i18nDict[k]) {
+      let s = __i18nDict[k];
+      if (subs && subs.length) subs.forEach((v, i) => { s = s.replace(new RegExp('\\$' + (i + 1), 'g'), String(v)); });
+      return s;
+    }
+  } catch {}
+  try {
+    return (chrome.i18n && chrome.i18n.getMessage ? chrome.i18n.getMessage(k, subs) : '') || k;
+  } catch {
+    return k;
+  }
+}
+function applyI18nPlaceholders(root) {
+  try {
+    const getMsg = (raw) => {
+      const m = /^__MSG_([A-Za-z0-9_]+)__$/.exec(raw || '');
+      if (!m) return null;
+      const key = m[1];
+      const v = (__i18nDict && __i18nDict[key]) || ((chrome.i18n && chrome.i18n.getMessage) ? chrome.i18n.getMessage(key) : '');
+      return v || null;
+    };
+    const ATTRS = ['title', 'placeholder', 'aria-label', 'alt'];
+    const all = (root || document).querySelectorAll('*');
+    all.forEach(el => {
+      ATTRS.forEach(attr => {
+        if (!el.hasAttribute(attr)) return;
+        const raw = el.getAttribute(attr);
+        const msg = getMsg(raw);
+        if (msg) el.setAttribute(attr, msg);
+      });
+      for (const node of Array.from(el.childNodes)) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const raw = node.textContent && node.textContent.trim();
+          const msg = getMsg(raw);
+          if (msg) node.textContent = msg;
+        }
+      }
+    });
+  } catch {}
+}
+
+// Speaker icon for TTS buttons (same style as other inline SVGs)
+var SPEAK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>';
+
+// Backend facade
+// Avoid duplicate const redeclare when UI script is injected twice
+// eslint-disable-next-line no-var
+var B = (typeof B !== 'undefined' && B) || (globalThis.CaptiPrep && globalThis.CaptiPrep.backend) || {};
+
+// 通用化：统一持久化抽象。非 YouTube 内容 → content:*，YouTube → video:*（向后兼容）
+function isContentMode() {
+  return !!currentState.sourceType && currentState.sourceType !== 'youtube';
+}
+function saveState(patch) {
+  if (isContentMode()) return B.saveContentData(currentState.contentId, patch);
+  return B.saveVideoData(currentState.videoId, patch);
+}
+function loadState() {
+  if (isContentMode()) return B.loadContentData(currentState.contentId);
+  return B.loadVideoData(currentState.videoId);
+}
+function updateSourceBadge() {
+  try {
+    const el = uiRoot && uiRoot.querySelector('#cc-source-badge');
+    if (!el) return;
+    const map = { youtube: 'YT', article: 'ART', selection: 'SEL', manual: 'MAN' };
+    const label = map[currentState.sourceType] || '';
+    el.textContent = label;
+    el.style.display = label ? 'inline-block' : 'none';
+    el.title = currentState.sourceType || '';
+  } catch {}
+}
+
+// Simple UI state
+// Use var so re-injection doesn't throw on redeclare
+var modalOpen = typeof modalOpen !== 'undefined' ? modalOpen : false;
+var uiRoot = typeof uiRoot !== 'undefined' ? uiRoot : null;
+var buildWatchTimer = typeof buildWatchTimer !== 'undefined' ? buildWatchTimer : null; // polling to reflect background building status
+var selectWatchTimer = typeof selectWatchTimer !== 'undefined' ? selectWatchTimer : null; // polling to reflect background selecting status
+var navWatchTimer = typeof navWatchTimer !== 'undefined' ? navWatchTimer : null; // watch YouTube SPA navigation for videoId changes
+var currentState = typeof currentState !== 'undefined' ? currentState : {
+  videoId: null,
+  contentId: null,
+  sourceType: null,
+  title: null,
+  subtitlesText: null,
+  captionLang: null,
+  candidates: null,
+  selected: null,
+  cards: null,
+  error: null,
+};
+
+// 全局 UI 状态
+var ccGridMode = typeof ccGridMode !== 'undefined' ? ccGridMode : false; // 是否网格视图
+var ccEditMode = typeof ccEditMode !== 'undefined' ? ccEditMode : false; // 是否编辑模式（大卡片）
+var currentCardIndex = typeof currentCardIndex !== 'undefined' ? currentCardIndex : 0; // 当前卡索引
+var pendingSourceType = typeof pendingSourceType !== 'undefined' ? pendingSourceType : null; // CC_OPEN_MODAL 待消费来源
+// 记录由插件暂停的 video 元素，便于关闭面板时恢复播放
+var __ccPausedVideos = (typeof __ccPausedVideos !== 'undefined') ? __ccPausedVideos : new Set();
+
+// 入口消息（负责 UI 开关）
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === 'CC_TOGGLE_MODAL') toggleModal();
+  // 通用化：后台/右键菜单注入后，按来源打开（用 pendingSourceType 交给 bootFlow 消费，避免重复流程）
+  if (msg && msg.type === 'CC_OPEN_MODAL' && msg.payload) {
+    const st = msg.payload.sourceType || null;
+    const wasOpen = modalOpen;
+    pendingSourceType = st;
+    if (!wasOpen) {
+      openModal();
+    } else {
+      if (uiRoot) uiRoot.style.display = 'block';
+      pendingSourceType = null;
+      if (st && st !== 'youtube') startContentFlow(st);
+      else if (st === 'youtube') startFlow(true);
+    }
+  }
+});
+
+function toggleModal() {
+  if (modalOpen) closeModal(); else openModal();
+}
+
+async function openModal() {
+  modalOpen = true;
+  if (!uiRoot) await createUI();
+  uiRoot.style.display = 'block';
+  pauseActiveVideo();
+  try { maybeShowWhatsNew(); } catch {}
+  bootFlow();
+  // Begin watching for SPA navigation after opening (仅 YouTube 有意义)
+  try { if (B.isYouTubePage && B.isYouTubePage(location.href)) startNavWatcher(); } catch {}
+}
+
+function closeModal() {
+  modalOpen = false;
+  if (uiRoot) uiRoot.style.display = 'none';
+  resumePausedVideos();
+  stopSpeech();
+  // stop background polling when panel is closed
+  try { if (buildWatchTimer) { clearInterval(buildWatchTimer); buildWatchTimer = null; } } catch {}
+  try { if (selectWatchTimer) { clearInterval(selectWatchTimer); selectWatchTimer = null; } } catch {}
+  try { if (navWatchTimer) { clearInterval(navWatchTimer); navWatchTimer = null; } } catch {}
+}
+
+async function createUI() {
+  uiRoot = document.createElement('div');
+  uiRoot.id = 'cc-root';
+
+  // 注入独立样式
+  try {
+    const href = chrome.runtime.getURL('assets/cc.css');
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    document.documentElement.appendChild(link);
+  } catch {
+    try {
+      const cssUrl = chrome.runtime.getURL('assets/cc.css');
+      const cssText = await fetch(cssUrl).then(r => r.text());
+      const style = document.createElement('style');
+      style.textContent = cssText;
+      document.documentElement.appendChild(style);
+    } catch {}
+  }
+
+  // 加载 UI 模板 + 语言字典
+  try {
+    const htmlUrl = chrome.runtime.getURL('assets/ui.html');
+    const resp = await fetch(htmlUrl);
+    if (!resp.ok) throw new Error('ui.html HTTP ' + resp.status);
+    const html = await resp.text();
+    if (!html || html.indexOf('cc-step') < 0) throw new Error('ui.html 模板缺失');
+    uiRoot.innerHTML = html;
+    try {
+      const store = await chrome.storage.local.get('settings');
+      let uiLang = (store && store.settings && store.settings.uiLang) || 'auto';
+      if (uiLang && uiLang !== 'auto') {
+        const url = chrome.runtime.getURL(`assets/i18n/${uiLang}.json`);
+        const res = await fetch(url);
+        if (res.ok) __i18nDict = await res.json();
+      }
+    } catch {}
+    applyI18nPlaceholders(uiRoot);
+  } catch (e) {
+    try { console.warn('[捕获生词] ui.html load failed', e && e.message); } catch {}
+    // 兜底模板：即使 ui.html 加载失败也保证核心元素 + 关闭按钮存在
+    uiRoot.innerHTML = '<div class="cc-overlay"><div class="cc-modal"><div class="cc-header"><div class="cc-title">捕获生词</div><div class="cc-actions"><button class="cc-icon" id="cc-close" aria-label="Close" title="Close">&times;</button></div></div><div class="cc-body"><div id="cc-step"></div><div id="cc-content">' + t('state_failed_load_ui') + '</div></div></div></div>';
+  }
+
+  document.documentElement.appendChild(uiRoot);
+
+  // 标题左侧添加品牌图标（避免重复插入）
+  try {
+    const titleEl = uiRoot.querySelector('.cc-title');
+    if (titleEl && !titleEl.querySelector('.cc-brand-icon')) {
+      const iconUrl = chrome.runtime.getURL('icon.png');
+      const span = document.createElement('span');
+      span.className = 'cc-brand-icon';
+      span.style.backgroundImage = `url(${iconUrl})`;
+      span.setAttribute('aria-hidden', 'true');
+      // 将图标放在标题文字左侧
+      titleEl.insertBefore(span, titleEl.firstChild);
+    }
+  } catch {}
+  
+  // 按钮事件
+  uiRoot.querySelector('#cc-close')?.addEventListener('click', closeModal);
+  uiRoot.querySelector('#cc-settings')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'CC_OPEN_OPTIONS' }));
+  uiRoot.querySelector('#cc-regenerate')?.addEventListener('click', () => startFlow(true));
+  uiRoot.querySelector('#cc-export')?.addEventListener('click', exportCSV);
+  uiRoot.querySelector('#cc-debuglog')?.addEventListener('click', exportLLMDebugLog);
+  // TTS speak buttons (event delegation; content re-renders often)
+  bindCardSpeak(uiRoot.querySelector('#cc-content'));
+  uiRoot.querySelector('#cc-toggleview')?.addEventListener('click', () => {
+    ccGridMode = !ccGridMode;
+    ccEditMode = false;
+    if (currentState.cards && currentState.cards.length) renderLearnView();
+    updateViewToggleButton();
+    updateBottomControls();
+  });
+  // 新增：单词本入口
+  uiRoot.querySelector('#cc-wordbook')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'CC_OPEN_WORDBOOK' });
+  });
+  // 通用化：新建内容（手动粘贴）
+  uiRoot.querySelector('#cc-new')?.addEventListener('click', () => {
+    currentState.sourceType = 'manual';
+    currentState.contentId = null;
+    openNewContentModal();
+  });
+
+  // 底部控制条
+  uiRoot.querySelector('#cc-b-prev')?.addEventListener('click', () => {
+    const cards = currentState.cards || [];
+    if (!cards.length || ccGridMode) return;
+    currentCardIndex = (currentCardIndex - 1 + cards.length) % cards.length;
+    ccEditMode = false;
+    blurActiveMiniButtons();
+    renderLearnView();
+  });
+  uiRoot.querySelector('#cc-b-next')?.addEventListener('click', () => {
+    const cards = currentState.cards || [];
+    if (!cards.length || ccGridMode) return;
+    currentCardIndex = (currentCardIndex + 1) % cards.length;
+    ccEditMode = false;
+    blurActiveMiniButtons();
+    renderLearnView();
+  });
+  uiRoot.querySelector('#cc-b-edit')?.addEventListener('click', () => {
+    if (ccGridMode || !(currentState.cards || []).length) return;
+    ccEditMode = !ccEditMode;
+    renderLearnView();
+  });
+  uiRoot.querySelector('#cc-b-save')?.addEventListener('click', async () => {
+    if (ccGridMode || !ccEditMode) return;
+    const cards = currentState.cards || [];
+    if (!cards.length) return;
+    const edited = readCardEditor();
+    cards[currentCardIndex] = edited;
+    await saveState( { cards });
+    ccEditMode = false;
+    renderLearnView();
+  });
+  // 新增：收藏当前词卡（快照）
+  uiRoot.querySelector('#cc-b-fav')?.addEventListener('click', async () => {
+    const cards = currentState.cards || [];
+    if (!cards.length || ccGridMode) return;
+    try {
+      const added = await toggleFavoriteCurrentCard();
+      const btn = uiRoot.querySelector('#cc-b-fav');
+      if (btn) {
+        btn.classList.toggle('active', added);
+        if (added) { btn.classList.add('cc-ok'); setTimeout(() => btn.classList.remove('cc-ok'), 600); }
+        // 清除按钮焦点，避免 hover message 持续
+        btn.blur();
+      }
+    } catch (e) {
+      console.warn('favorite toggle failed', e);
+    }
+  });
+
+  // 键盘快捷：左右箭头 + 空格（收藏）
+  // 使用捕获阶段，并在 keydown/keypress/keyup 阶段拦截空格，避免传递到 YouTube 页面触发播放/暂停
+  document.addEventListener('keydown', onCcKeydown, true);
+  document.addEventListener('keypress', onCcKeypress, true);
+  document.addEventListener('keyup', onCcKeyup, true);
+}
+
+// ===== "What's New" (更新提示) =====
+async function maybeShowWhatsNew() {
+  try {
+    const man = chrome.runtime.getManifest();
+    const ver = (man && man.version) || '';
+    if (!ver) return;
+    const { cc_whatsnew_seen } = await chrome.storage.local.get(['cc_whatsnew_seen']);
+    if (cc_whatsnew_seen === ver) return; // 本版本已经看过
+    const changelog = await loadChangelogForVersion(ver);
+    showWhatsNewOverlay(ver, changelog);
+  } catch (e) {
+    // silent
+  }
+}
+
+async function loadChangelogForVersion(ver) {
+  try {
+    // Resolve preferred UI language (settings override -> browser UI)
+    let pref = 'auto';
+    try { const s = await (B.getSettings ? B.getSettings() : Promise.resolve({})); pref = (s && s.uiLang) || 'auto'; } catch {}
+    let ui = pref && pref !== 'auto' ? pref : ((chrome.i18n && typeof chrome.i18n.getUILanguage === 'function') ? chrome.i18n.getUILanguage() : (navigator.language || 'en'));
+    const norm = (l => { const c = String(l||'').toLowerCase(); if (c.startsWith('en')) return 'en'; if (c.startsWith('zh')) return 'zh_CN'; return 'en'; })(ui);
+
+    // Only two localized files are supported by design
+    const path = norm === 'zh_CN' ? 'assets/CHANGELOG.zh_CN.md' : 'assets/CHANGELOG.en.md';
+    const url = chrome.runtime.getURL(path);
+    const res = await fetch(url);
+    const text = res && res.ok ? await res.text() : '';
+    if (!text) return '';
+    // Try to extract section for current version, headings like: ## v1.2.3 or ## 1.2.3
+    const lines = text.split(/\r?\n/);
+    // Regex-based parse for the current version heading
+    const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const reStart = new RegExp(`^##\s*v?${esc(ver)}`);
+    let i = lines.findIndex(l => reStart.test(l));
+    if (i === -1) {
+      // Take the first section after the first heading
+      i = lines.findIndex(l => /^##\s+/.test(l));
+    }
+    if (i === -1) return lines.slice(0, 20).join('\n');
+    let j = i + 1;
+    while (j < lines.length && !/^##\s+/.test(lines[j])) j++;
+    return lines.slice(i + 1, j).join('\n').trim();
+  } catch { return ''; }
+}
+
+function showWhatsNewOverlay(ver, mdText) {
+  const modal = uiRoot && uiRoot.querySelector('.cc-modal');
+  if (!modal) return;
+  let ov = modal.querySelector('.cc-update-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.className = 'cc-update-overlay';
+    ov.innerHTML = `
+      <div class="cc-update" role="dialog" aria-modal="true" aria-label="${t('whats_new_aria')}">
+        <div class="cc-update-header">
+          <div class="cc-update-title" id="cc-update-title"></div>
+          <button class="cc-mini-btn" id="cc-update-close" aria-label="${t('action_close')}" title="${t('action_close')}">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="cc-update-body">
+          <div class="cc-card cc-update-card">
+            <div class="cc-update-content" id="cc-update-content"></div>
+          </div>
+        </div>
+        <div class="cc-update-bottom">
+          <button class="cc-btn-white" id="cc-update-dismiss">${t('whats_new_dismiss')}</button>
+        </div>
+      </div>`;
+    modal.appendChild(ov);
+  }
+  const titleEl = ov.querySelector('#cc-update-title');
+  if (titleEl) titleEl.textContent = t('whats_new_header', ver);
+  const cEl = ov.querySelector('#cc-update-content');
+  cEl.innerHTML = renderMarkdownSimple(mdText || '');
+  // Wire events
+  const hideOnly = () => { ov.style.display = 'none'; };
+  const dismiss = async () => {
+    try {
+      const man = chrome.runtime.getManifest();
+      const verNow = (man && man.version) || ver;
+      await chrome.storage.local.set({ cc_whatsnew_seen: verNow });
+    } catch {}
+    ov.style.display = 'none';
+  };
+  ov.querySelector('#cc-update-close')?.addEventListener('click', hideOnly, { once: true });
+  ov.querySelector('#cc-update-dismiss')?.addEventListener('click', dismiss, { once: true });
+  ov.style.display = 'flex';
+}
+
+function renderMarkdownSimple(md) {
+  const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const lines = String(md || '').split(/\r?\n/);
+  const out = [];
+  for (let line of lines) {
+    if (!line.trim()) { out.push(''); continue; }
+    // Bullet
+    if (/^\s*[-*]\s+/.test(line)) {
+      const text = esc(line.replace(/^\s*[-*]\s+/, ''));
+      out.push(`<li>${text}</li>`);
+      continue;
+    }
+    // Heading -> bold
+    if (/^\s*#+\s+/.test(line)) {
+      const t = esc(line.replace(/^\s*#+\s+/, ''));
+      out.push(`<div><b>${t}</b></div>`);
+      continue;
+    }
+    out.push(`<div>${esc(line)}</div>`);
+  }
+  // Wrap consecutive <li> into <ul>
+  const html = out.join('\n');
+  const wrapped = html.replace(/(?:\n|^)(<li>[^]*?<\/li>)(?=(?:\n(?!<li>)|$))/g, (m) => `<ul>${m.trim()}</ul>`);
+  return wrapped;
+}
+
+function onCcKeydown(e) {
+  if (!modalOpen) return;
+  const k = e.key;
+  if (k === 'Escape') {
+    const t = e.target;
+    const tag = (t && t.tagName ? t.tagName.toLowerCase() : '');
+    const isEditable = (tag === 'input' || tag === 'textarea' || (t && t.isContentEditable));
+    if (isEditable) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch {}
+    closeModal();
+    return;
+  }
+  // Space toggles favorite on current card (when not editing inputs)
+  if (k === ' ' || k === 'Spacebar' || e.code === 'Space') {
+    const t2 = e.target;
+    const tag2 = (t2 && t2.tagName ? t2.tagName.toLowerCase() : '');
+    const isEditable2 = (tag2 === 'input' || tag2 === 'textarea' || (t2 && t2.isContentEditable));
+    if (isEditable2) return;
+    const cards = currentState.cards || [];
+    if (!cards.length || ccGridMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { const btn = uiRoot && uiRoot.querySelector('#cc-b-fav'); if (btn) btn.click(); } catch {}
+    return;
+  }
+  if (k !== 'ArrowLeft' && k !== 'ArrowRight') return;
+  const t = e.target;
+  const tag = (t && t.tagName ? t.tagName.toLowerCase() : '');
+  const isEditable = (tag === 'input' || tag === 'textarea' || (t && t.isContentEditable));
+  if (isEditable) return;
+  const cards = currentState.cards || [];
+  if (!cards.length || ccGridMode) return;
+  e.preventDefault();
+  e.stopPropagation();
+  blurActiveMiniButtons();
+  if (k === 'ArrowLeft') currentCardIndex = (currentCardIndex - 1 + cards.length) % cards.length;
+  else currentCardIndex = (currentCardIndex + 1) % cards.length;
+  ccEditMode = false;
+  renderLearnView();
+}
+
+// 在 keypress/keyup 阶段同样隔离空格，防止页面层收到事件（如 YouTube 播放/暂停）
+function shouldInterceptSpace(e) {
+  if (!modalOpen) return false;
+  const k = e.key;
+  if (!(k === ' ' || k === 'Spacebar' || e.code === 'Space')) return false;
+  const t = e.target;
+  const tag = (t && t.tagName ? t.tagName.toLowerCase() : '');
+  const isEditable = (tag === 'input' || tag === 'textarea' || (t && t.isContentEditable));
+  if (isEditable) return false;
+  const cards = currentState.cards || [];
+  if (!cards.length || ccGridMode) return false;
+  return true;
+}
+
+function onCcKeypress(e) {
+  if (!shouldInterceptSpace(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try { e.stopImmediatePropagation && e.stopImmediatePropagation(); } catch {}
+}
+
+function onCcKeyup(e) {
+  if (!shouldInterceptSpace(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try { e.stopImmediatePropagation && e.stopImmediatePropagation(); } catch {}
+}
+
+async function bootFlow() {
+  const settings = await B.getSettings();
+  if (!settings.apiKey) {
+    setStep([t('steps_setup'), t('steps_extract'), t('steps_build')], 1);
+    renderOnboarding();
+    return;
+  }
+  // 通用化：非 YouTube 页面 → 内容源流程（文章 / 划词）
+  if (typeof B.isYouTubePage === 'function' && !B.isYouTubePage(location.href)) {
+    const pst = pendingSourceType; pendingSourceType = null;
+    await startContentFlow(pst || 'auto');
+    return;
+  }
+  pendingSourceType = null;
+  const { videoId, title } = B.getYouTubeVideoInfo();
+  currentState.videoId = videoId;
+  currentState.sourceType = 'youtube';
+  currentState.contentId = null;
+  currentState.title = title;
+  const saved = await B.loadVideoData(videoId);
+  if (saved && saved.cards && saved.cards.length) {
+    currentState.subtitlesText = saved.subtitlesText || null;
+    currentState.captionLang = saved.captionLang || null;
+    currentState.candidates = saved.candidates || null;
+    currentState.selected = saved.selected || null;
+    currentState.cards = saved.cards || null;
+    renderLearnView();
+    setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+    return;
+  }
+  // If background is currently building, keep UI in syncing state instead of restarting the pipeline
+  if (saved && saved.building && (saved.selected && saved.selected.length)) {
+    currentState.subtitlesText = saved.subtitlesText || null;
+    currentState.captionLang = saved.captionLang || null;
+    currentState.candidates = saved.candidates || null;
+    currentState.selected = saved.selected || null;
+    setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+    renderProgress(t('progress_generating'));
+    startBuildWatcher();
+    return;
+  }
+  startFlow();
+}
+
+// ===== 通用化：内容源流程（文章 / 划词 / 手动）=====
+async function startContentFlow(sourceType, opts) {
+  try {
+    setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 1);
+    renderProgress(t('steps_extract') + '…');
+    // ① 捕获内容（auto 时由页面自动识别）
+    const resolved = (sourceType && sourceType !== 'auto') ? sourceType : (B.getCurrentSourceType ? B.getCurrentSourceType() : 'article');
+    const captured = await B.captureContent(resolved, opts || {});
+    if (!captured || !captured.text) { renderError(t('error_captions'), 'No content captured'); return; }
+    // ② 初始化状态（含来源徽标）
+    currentState.sourceType = captured.sourceType;
+    currentState.contentId = captured.id;
+    currentState.videoId = null;
+    currentState.title = captured.title || '';
+    currentState.subtitlesText = captured.text;
+    currentState.captionLang = (captured.lang && captured.lang !== 'und') ? captured.lang : null;
+    currentState.candidates = null; currentState.selected = null; currentState.cards = null; currentState.error = null;
+    updateSourceBadge();
+    const createdAt = formatDateYYYYMMDD(new Date());
+    await B.saveContentData(captured.id, {
+      sourceType: captured.sourceType, sourceUrl: captured.sourceUrl || '', title: currentState.title,
+      subtitlesText: captured.text, captionLang: currentState.captionLang, lang: captured.lang || '',
+      meta: captured.meta || {}, createdAt,
+    });
+    // ②.5 恢复已有进度（避免重复跑 LLM）
+    const prev = await B.loadContentData(captured.id);
+    if (prev && prev.cards && prev.cards.length) {
+      currentState.candidates = prev.candidates || null;
+      currentState.selected = prev.selected || null;
+      currentState.cards = prev.cards;
+      setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+      renderLearnView();
+      return;
+    }
+    if (prev && Array.isArray(prev.candidates) && prev.candidates.length) {
+      currentState.candidates = prev.candidates;
+      currentState.selected = prev.selected || null;
+      setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+      renderSelection();
+      return;
+    }
+    // ③ 筛选词汇（文章给更大采样预算，降低漏词）
+    setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+    renderProgress(t('progress_filtering'));
+    await B.saveContentData(captured.id, { selecting: true });
+    const budget = captured.sourceType === 'article' ? 30000 : 12000;
+    const sampled = sampleTranscript(captured.text, budget);
+    const resp = await llmCallTimed('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
+    currentState.candidates = resp.items || [];
+    await B.saveContentData(captured.id, { candidates: currentState.candidates, selecting: false });
+    hideCenterOverlay();
+    renderSelection();
+  } catch (e) {
+    currentState.error = String(e && e.message || e);
+    renderError(t('error_captions'), currentState.error);
+  }
+}
+
+// 手动新建内容（粘贴文本）
+function openNewContentModal() {
+  try {
+    const content = uiRoot && uiRoot.querySelector('#cc-content');
+    if (!content) return;
+    content.innerHTML =
+      '<div class="cc-card">' +
+        '<div class="cc-setup-title"><b>' + t('new_content_title') + '</b></div>' +
+        '<p class="cc-small cc-setup-desc">' + t('new_content_desc') + '</p>' +
+        '<div class="cc-controls" style="flex-direction:column;align-items:stretch;gap:8px;">' +
+          '<input id="cc-new-title" class="cc-input" placeholder="' + t('new_content_title_ph') + '" style="padding:8px;border:1px solid var(--cc-border,#ddd);border-radius:8px;"/>' +
+          '<textarea id="cc-new-text" class="cc-input" rows="8" placeholder="' + t('new_content_text_ph') + '" style="padding:8px;border:1px solid var(--cc-border,#ddd);border-radius:8px;resize:vertical;"></textarea>' +
+          '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+            '<button class="cc-btn-white" id="cc-new-cancel">' + t('btn_cancel') + '</button>' +
+            '<button class="cc-btn" id="cc-new-go">' + t('new_content_go') + '</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    updateBottomControls();
+    content.querySelector('#cc-new-cancel')?.addEventListener('click', () => { openModal(); });
+    content.querySelector('#cc-new-go')?.addEventListener('click', async () => {
+      const text = (content.querySelector('#cc-new-text')?.value || '').trim();
+      const title = (content.querySelector('#cc-new-title')?.value || '').trim();
+      if (!text) { alert(t('new_content_empty')); return; }
+      await startContentFlow('manual', { text, title });
+    });
+  } catch (e) { console.warn(e); }
+}
+
+async function startFlow(forceRegenerate = false) {
+  // Ensure we have a stable videoId (YouTube SPA may not set URL params immediately)
+  try { await ensureVideoId(); } catch {}
+  currentState = { ...currentState, candidates: null, selected: null, cards: null, error: null };
+  setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 1);
+  renderProgress(t('steps_extract') + '…');
+  try {
+    const { videoId, title } = B.getYouTubeVideoInfo();
+    currentState.videoId = videoId;
+    currentState.title = title;
+    // Load saved state and detect if user changed CC selection on the page
+    const saved = await B.loadVideoData(videoId);
+    let shouldForce = !!forceRegenerate;
+    let currentSig = '';
+    try {
+      if (B.getSelectedCaptionTrack) {
+        const sel = await B.getSelectedCaptionTrack();
+        if (sel) {
+          const t = sel.translationLanguage;
+          const tlang = typeof t === 'string' ? t : (t && t.languageCode) || '';
+          currentSig = [sel.languageCode || '', sel.vssId || '', sel.kind || '', tlang || ''].join('|');
+          const prevSig = saved && saved.selectedTrackSig;
+          if (!shouldForce && prevSig && currentSig && prevSig !== currentSig) {
+            shouldForce = true;
+          }
+          // If no previous signature, but saved.captionLang differs from current selected language, also force
+          if (!shouldForce && saved && saved.captionLang && sel.languageCode && saved.captionLang !== sel.languageCode) {
+            shouldForce = true;
+          }
+        }
+      }
+    } catch {}
+    // If forcing due to track change, clear persisted intermediate state to avoid mixing
+    if (shouldForce) {
+      try { await B.saveVideoData(videoId, { subtitlesText: null, candidates: null, selected: null, cards: null }); } catch {}
+    }
+    if (!shouldForce) {
+      if (saved && saved.cards?.length) {
+        currentState = { ...currentState, ...saved };
+        renderLearnView();
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+        return;
+      }
+      // If previously started building, don't redo captions/selection; just reflect progress
+      if (saved && saved.building && (saved.selected && saved.selected.length)) {
+        currentState.subtitlesText = saved.subtitlesText || null;
+        currentState.candidates = saved.candidates || null;
+        currentState.selected = saved.selected || null;
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+        renderProgress(t('progress_generating'));
+        startBuildWatcher();
+        return;
+      }
+      // If candidates already exist and user hasn't selected yet, go directly to selection UI
+      if (saved && Array.isArray(saved.candidates) && saved.candidates.length && (!saved.selected || !saved.selected.length)) {
+        currentState.subtitlesText = saved.subtitlesText || null;
+        currentState.captionLang = saved.captionLang || null;
+        currentState.candidates = saved.candidates || [];
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+        renderSelection();
+        return;
+      }
+      // If selecting is in progress, show filtering progress and watch for completion
+      if (saved && saved.selecting && saved.subtitlesText) {
+        currentState.subtitlesText = saved.subtitlesText;
+        currentState.captionLang = saved.captionLang || null;
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+        renderProgress(t('progress_filtering'));
+        startSelectWatcher();
+        return;
+      }
+      // If subtitles already extracted, skip extraction and continue to filtering
+      if (saved && saved.subtitlesText) {
+        currentState.subtitlesText = saved.subtitlesText;
+        currentState.captionLang = saved.captionLang || null;
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+        renderProgress(t('progress_filtering'));
+        await saveState( { selecting: true });
+        try {
+          // Refresh captionLang from currently selected track as a guard
+          try {
+            if (B.getSelectedCaptionTrack) {
+              const sTrack = await B.getSelectedCaptionTrack();
+              if (sTrack && sTrack.languageCode) currentState.captionLang = sTrack.languageCode;
+            }
+          } catch {}
+          const sampled = sampleTranscript(currentState.subtitlesText, 12000);
+          const resp = await llmCallTimed('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
+          currentState.candidates = resp.items || [];
+          await saveState( { candidates: currentState.candidates, selecting: false });
+        } catch (e) {
+          await saveState( { selecting: false });
+          throw e;
+        }
+        hideCenterOverlay();
+        renderSelection();
+        return;
+      }
+    }
+    const cap = await B.extractCaptionsText();
+    if (typeof cap === 'string') {
+      currentState.subtitlesText = cap;
+      currentState.captionLang = null;
+    } else {
+      currentState.subtitlesText = cap && cap.text || '';
+      currentState.captionLang = cap && cap.lang || null;
+    }
+    // If extraction did not provide a language, infer from current selected track
+    if (!currentState.captionLang) {
+      try {
+        if (B.getSelectedCaptionTrack) {
+          const sel3 = await B.getSelectedCaptionTrack();
+          if (sel3 && sel3.languageCode) currentState.captionLang = sel3.languageCode;
+        }
+      } catch {}
+    }
+    const createdAt = formatDateYYYYMMDD(new Date());
+    const toSave = { subtitlesText: currentState.subtitlesText, captionLang: currentState.captionLang, title, createdAt };
+    if (currentSig) toSave.selectedTrackSig = currentSig;
+    else {
+      try {
+        if (B.getSelectedCaptionTrack) {
+          const sel2 = await B.getSelectedCaptionTrack();
+          if (sel2) {
+            const t2 = sel2.translationLanguage;
+            const tlang2 = typeof t2 === 'string' ? t2 : (t2 && t2.languageCode) || '';
+            toSave.selectedTrackSig = [sel2.languageCode || '', sel2.vssId || '', sel2.kind || '', tlang2 || ''].join('|');
+          }
+        }
+      } catch {}
+    }
+    await saveState( toSave);
+  } catch (e) {
+    currentState.error = String(e?.message || e);
+    renderError(t('error_captions'), currentState.error);
+    return;
+  }
+
+  setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+  renderProgress(t('progress_filtering'));
+  try {
+    await saveState( { selecting: true });
+    const sampled = sampleTranscript(currentState.subtitlesText, 12000);
+    const resp = await llmCallTimed('first', { subtitlesText: sampled, captionLang: currentState.captionLang, maxItems: 20 });
+    currentState.candidates = resp.items || [];
+    await saveState( { candidates: currentState.candidates, selecting: false });
+  } catch (e) {
+    currentState.error = String(e?.message || e);
+    try { await saveState( { selecting: false }); } catch {}
+    renderError(t('error_llm1'), currentState.error);
+    return;
+  }
+
+  renderSelection();
+}
+
+// Watch for YouTube SPA navigation: if videoId changes while面板打开，自动重置并重启流程
+function startNavWatcher() {
+  try { if (navWatchTimer) { clearInterval(navWatchTimer); navWatchTimer = null; } } catch {}
+  navWatchTimer = setInterval(async () => {
+    if (!modalOpen) return;
+    try {
+      const info = B.getYouTubeVideoInfo();
+      const vid = info && info.videoId;
+      if (vid && currentState.videoId && vid !== currentState.videoId) {
+        // Detected a new video; reset state and restart pipeline
+        try { if (buildWatchTimer) { clearInterval(buildWatchTimer); buildWatchTimer = null; } } catch {}
+        try { if (selectWatchTimer) { clearInterval(selectWatchTimer); selectWatchTimer = null; } } catch {}
+        currentState = { videoId: vid, sourceType: 'youtube', contentId: null, title: info.title || '', subtitlesText: null, captionLang: null, candidates: null, selected: null, cards: null, error: null };
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 1);
+        renderProgress(t('steps_extract') + '…');
+        startFlow(true);
+      }
+    } catch {}
+  }, 900);
+}
+
+// Try repeatedly to get a non-empty videoId
+async function ensureVideoId(timeoutMs = 3000) {
+  const start = Date.now();
+  let info = B.getYouTubeVideoInfo();
+  while ((!info || !info.videoId) && (Date.now() - start) < timeoutMs) {
+    await new Promise(r => setTimeout(r, 150));
+    info = B.getYouTubeVideoInfo();
+  }
+  if (info && info.videoId) return info.videoId;
+  return null;
+}
+
+// 自愈：若核心元素缺失（如 ui.html 加载失败），重建最小可用模板，避免渲染崩溃
+function ensureUIRoot() {
+  try {
+    if (uiRoot && !uiRoot.querySelector('#cc-step')) {
+      uiRoot.innerHTML = '<div class="cc-overlay"><div class="cc-modal"><div class="cc-header"><div class="cc-title">捕获生词</div><div class="cc-actions"><button class="cc-icon" id="cc-close" aria-label="Close" title="Close">&times;</button></div></div><div class="cc-body"><div id="cc-step"></div><div id="cc-content"></div></div></div></div>';
+      try { uiRoot.querySelector('#cc-close')?.addEventListener('click', closeModal); } catch {}
+    }
+  } catch (e) {}
+}
+
+function setStep(steps, activeIndex) {
+  ensureUIRoot();
+  const stepEl = uiRoot.querySelector('#cc-step');
+  if (!stepEl) return;
+  const canClickFilter = activeIndex === 3;
+  const canClickBuild = activeIndex === 2 && (currentState.cards && currentState.cards.length);
+  const inner = [
+    `<div class="cc-stepchip ${1===activeIndex?'active':''}">${steps[0]}</div>`,
+    `<div class="cc-step-arrow">${iconArrow()}</div>`,
+    `<div class="cc-stepchip ${2===activeIndex?'active':''} ${canClickFilter ? 'clickable' : ''}" id="cc-step-filter">${steps[1]}</div>`,
+    `<div class="cc-step-arrow">${iconArrow()}</div>`,
+    `<div class="cc-stepchip ${3===activeIndex?'active':''} ${canClickBuild ? 'clickable' : ''}" id="cc-step-build">${steps[2]}</div>`
+  ].join('');
+  stepEl.innerHTML = `<div class="cc-progress">${inner}</div>`;
+
+  if (canClickFilter) {
+    const el = stepEl.querySelector('#cc-step-filter');
+    if (el) el.addEventListener('click', () => { setStep(steps, 2); renderSelection(); });
+  }
+  if (canClickBuild) {
+    const el2 = stepEl.querySelector('#cc-step-build');
+    if (el2) el2.addEventListener('click', () => { setStep(steps, 3); renderLearnView(); });
+  }
+}
+
+function updateViewToggleButton() {
+  const btn = uiRoot && uiRoot.querySelector('#cc-toggleview');
+  if (!btn) return;
+  if (ccGridMode) {
+    btn.innerHTML = iconCard();
+    btn.setAttribute('aria-label', t('action_card_view'));
+    btn.setAttribute('title', t('action_card_view'));
+  } else {
+    btn.innerHTML = iconGrid();
+    btn.setAttribute('aria-label', t('action_grid_view'));
+    btn.setAttribute('title', t('action_grid_view'));
+  }
+}
+
+function updateBottomControls() {
+  const ctr = uiRoot && uiRoot.querySelector('#cc-bottom-controls');
+  const counter = uiRoot && uiRoot.querySelector('#cc-card-counter');
+  if (!ctr || !counter) return;
+  // 仅在“Build cards”阶段（学习视图的大卡片渲染时）显示底部按钮
+  const content = uiRoot && uiRoot.querySelector('#cc-content');
+  const inBuildView = !!(content && content.querySelector('.cc-card.cc-large'));
+  const hasCards = !!(currentState.cards && currentState.cards.length);
+  if (!hasCards || ccGridMode || !inBuildView) {
+    ctr.style.display = 'none';
+    counter.style.display = 'none';
+    return;
+  }
+  ctr.style.display = 'flex';
+  counter.style.display = 'block';
+  counter.textContent = `${currentCardIndex + 1} / ${currentState.cards.length}`;
+  const saveBtn = ctr.querySelector('#cc-b-save');
+  if (saveBtn) saveBtn.disabled = !ccEditMode;
+  // update favorite button active state
+  updateFavButtonActive();
+}
+
+function showCenterOverlay(text) {
+  const modal = uiRoot && uiRoot.querySelector('.cc-modal');
+  if (!modal) return;
+  let ov = modal.querySelector('.cc-center-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.className = 'cc-center-overlay';
+    ov.innerHTML = `<div class="cc-center"><div class="cc-spinner"></div><div class="cc-center-text"></div></div>`;
+    modal.appendChild(ov);
+  }
+  const t = ov.querySelector('.cc-center-text');
+  if (t) t.textContent = text || '';
+  ov.style.display = 'flex';
+}
+function hideCenterOverlay() {
+  const modal = uiRoot && uiRoot.querySelector('.cc-modal');
+  if (!modal) return;
+  const ov = modal.querySelector('.cc-center-overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+function renderProgress(text) {
+  ensureUIRoot();
+  const content = uiRoot.querySelector('#cc-content');
+  if (!content) return;
+  content.innerHTML = '';
+  showCenterOverlay(text);
+  updateBottomControls();
+}
+
+function renderError(title, err) {
+  hideCenterOverlay();
+  ensureUIRoot();
+  const content = uiRoot.querySelector('#cc-content');
+  if (!content) return;
+  content.innerHTML = `<div class="cc-card"><div><b>${title}</b></div><pre>${escapeHtml(err)}</pre></div>`;
+  updateBottomControls();
+}
+
+function renderSelection() {
+  hideCenterOverlay();
+  const content = uiRoot.querySelector('#cc-content');
+  const items = currentState.candidates || [];
+  if (!items.length) {
+    content.innerHTML = `<div class="cc-card">
+      <div><b>${t('select_title')}</b></div>
+      <div class="cc-small" style="margin-top:6px">${t('empty_no_candidates') || '未提取到候选词。可以尝试重新生成或稍后重试。'}</div>
+      <div class="cc-controls" style="margin-top:10px">
+        <button class="cc-btn-white" id="cc-retry">${t('action_regenerate') || '重新生成'}</button>
+      </div>
+    </div>`;
+    content.querySelector('#cc-retry')?.addEventListener('click', () => startFlow(true));
+    updateBottomControls();
+    return;
+  }
+  const toolbar = `
+    <div class="cc-toolbar">
+      <div class="cc-toolbar-title">${t('select_title')}</div>
+      <div class="cc-toolbar-actions">
+        <button class="cc-btn-white" id="cc-sel-all" aria-label="${t('select_all')}">${t('select_all')}</button>
+        <button class="cc-btn-white" id="cc-next" aria-label="${t('next')}">${t('next')}</button>
+      </div>
+    </div>
+  `;
+  const list = `
+    <div class="cc-list" id="cc-cand-list">
+      ${items.map((it, idx) => `
+        <label class="cc-cand-item">
+          <input type="checkbox" id="cc-cb-${idx}" data-idx="${idx}" ${it.selected? 'checked':''}/>
+          <div><b>${escapeHtml(it.term)}</b> <span class="cc-small">(${escapeHtml(it.type||'word')})</span></div>
+        </label>
+      `).join('')}
+    </div>
+  `;
+  content.innerHTML = `<div class="cc-card cc-select">${toolbar}${list}</div>`;
+  updateBottomControls();
+
+  const updateSelBtn = () => {
+    const boxes = Array.from(content.querySelectorAll('input[type="checkbox"]'));
+    const allChecked = boxes.length > 0 && boxes.every(cb => cb.checked);
+    const btn = content.querySelector('#cc-sel-all');
+    if (btn) btn.textContent = allChecked ? t('unselect_all') : t('select_all');
+  };
+
+  content.querySelector('#cc-sel-all')?.addEventListener('click', () => {
+    const boxes = Array.from(content.querySelectorAll('input[type="checkbox"]'));
+    const allChecked = boxes.length > 0 && boxes.every(cb => cb.checked);
+    boxes.forEach(cb => cb.checked = !allChecked);
+    updateSelBtn();
+  });
+  content.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', updateSelBtn));
+  updateSelBtn();
+
+  content.querySelector('#cc-next')?.addEventListener('click', async () => {
+    const selected = [];
+    content.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      if (cb.checked) {
+        const idx = Number(cb.getAttribute('data-idx'));
+        const it = items[idx];
+        selected.push({ term: it.term, type: it.type || 'word' });
+      }
+    });
+    currentState.selected = selected;
+    await saveState( { selected });
+    buildCards();
+  });
+}
+
+async function buildCards() {
+  setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+  renderProgress(t('progress_generating'));
+  try {
+    // mark background building so UI can resume progress on reopen
+    await saveState( { building: true });
+    const context = buildContextForSelected(currentState.subtitlesText, currentState.selected, currentState.captionLang, 2);
+    const resp = await llmCallTimed('second', { selected: currentState.selected, captionLang: currentState.captionLang, context });
+    currentState.cards = resp.cards || [];
+    // 初次生成写入 createdAt（如果尚未存在）
+    const saved = await loadState() || {};
+    const createdAt = saved.createdAt || formatDateYYYYMMDD(new Date());
+    await saveState( { cards: currentState.cards, createdAt, building: false });
+    renderLearnView();
+  } catch (e) {
+    currentState.error = String(e?.message || e);
+    try { await saveState( { building: false }); } catch {}
+    renderError(t('error_llm2'), currentState.error);
+  }
+}
+
+function startBuildWatcher() {
+  try { if (buildWatchTimer) { clearInterval(buildWatchTimer); buildWatchTimer = null; } } catch {}
+  buildWatchTimer = setInterval(async () => {
+    if (!modalOpen) return; // if closed, we will clear on close
+    try {
+      const saved = await loadState();
+      if (saved && saved.cards && saved.cards.length) {
+        clearInterval(buildWatchTimer);
+        buildWatchTimer = null;
+        currentState.cards = saved.cards;
+        renderLearnView();
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 3);
+      }
+    } catch {}
+  }, 1500);
+}
+
+function startSelectWatcher() {
+  try { if (selectWatchTimer) { clearInterval(selectWatchTimer); selectWatchTimer = null; } } catch {}
+  selectWatchTimer = setInterval(async () => {
+    if (!modalOpen) return;
+    try {
+      const saved = await loadState();
+      if (saved && Array.isArray(saved.candidates) && saved.candidates.length) {
+        clearInterval(selectWatchTimer);
+        selectWatchTimer = null;
+        currentState.candidates = saved.candidates;
+        hideCenterOverlay();
+        setStep([t('steps_extract'), t('steps_filter'), t('steps_build')], 2);
+        renderSelection();
+      }
+    } catch {}
+  }, 1200);
+}
+
+function renderLearnView() {
+  hideCenterOverlay();
+  const content = uiRoot.querySelector('#cc-content');
+  const cards = currentState.cards || [];
+  if (!cards.length) {
+    content.innerHTML = '<div class="cc-card">' + t('empty_no_cards') + '</div>';
+    updateBottomControls();
+    return;
+  }
+
+  const renderBig = () => `
+    <div class="cc-card cc-large">
+      ${ccEditMode ? renderCardEditor(cards[currentCardIndex]) : renderCardView(cards[currentCardIndex])}
+    </div>
+  `;
+
+  const renderGrid = () => `
+    <div class="cc-grid">
+      ${cards.map(c => {
+        const pron = formatPronunciationMeta(c, currentState.captionLang);
+        const meta = [pron, c.pos ? escapeHtml(c.pos) : '']
+          .filter(Boolean)
+          .join(' · ');
+        return `
+          <div class="cc-card">
+            <div><b>${escapeHtml(c.term)}</b></div>
+            ${meta ? `<div class=\"cc-small\">${meta}</div>` : ''}
+            <div>${escapeHtml(c.definition || '')}</div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  const doRender = () => {
+    stopSpeech();
+    content.innerHTML = ccGridMode ? renderGrid() : renderBig();
+    if (ccGridMode) {
+      Array.from(content.querySelectorAll('.cc-card')).forEach((el, i) => {
+        el.style.cursor = 'pointer';
+        el.addEventListener('click', () => { currentCardIndex = i; ccGridMode = false; ccEditMode = false; updateViewToggleButton(); doRender(); });
+      });
+    }
+    updateViewToggleButton();
+    updateBottomControls();
+    updateFavButtonActive();
+  };
+
+  doRender();
+  // Start SPA navigation watcher once we reach learn view or after panel is fully initialized
+  try { startNavWatcher(); } catch {}
+}
+
+function renderCardView(card) {
+  const c = { term: '', ipa: '', pos: '', definition: '', examples: [], notes: '', ...card };
+  const pron = formatPronunciationMeta(c, currentState.captionLang);
+  const examplesHtml = renderExamplesQuoteEx(c.examples || []);
+  const lang = normalizeLang(currentState.captionLang);
+  const termSpeak = c.term ? `<button type="button" class="cc-speak" data-tts="term" data-lang="${escapeAttr(lang)}" title="${t('action_speak')}" aria-label="${t('action_speak')}">${SPEAK_ICON}</button>` : '';
+  return `
+    <div class="cc-view">
+      <div class="term">${escapeHtml(c.term)}${termSpeak}</div>
+      <div class="meta">${pron ? `${pron}` : ''} ${c.pos ? `· ${escapeHtml(c.pos)}` : ''}</div>
+      <div class="definition">${escapeHtml(c.definition||'')}</div>
+      ${examplesHtml}
+      ${c.notes ? `<div class="notes">${escapeHtml(c.notes)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderExamplesQuote(list) {
+  if (!list || !list.length) return '';
+  const blocks = list.slice(0, 2).map(raw => {
+    const lines = String(raw).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const en = lines[0] || '';
+    const zh = lines[1] || '';
+    return `<blockquote><div>${escapeHtml(en)}</div>${zh ? `<div class="cc-small">${escapeHtml(zh)}</div>` : ''}</blockquote>`;
+  }).join('');
+  return `<div class="examples-quote">${blocks}</div>`;
+}
+
+function renderCardEditor(card) {
+  const c = { term: '', reading: '', ipa: '', pos: '', definition: '', examples: [], notes: '', ...card };
+  return `
+    <div class="cc-editor">
+      <label>${t('card_field_term')}</label><input class="cc-input" id="cc-term" value="${escapeAttr(c.term)}"/>
+      <label>Reading</label><input class="cc-input" id="cc-reading" value="${escapeAttr(c.reading||'')}"/>
+      <label>${t('card_field_ipa')}</label><input class="cc-input" id="cc-ipa" value="${escapeAttr(c.ipa)}"/>
+      <label>${t('card_field_pos')}</label><input class="cc-input" id="cc-pos" value="${escapeAttr(c.pos)}"/>
+      <label>${t('card_field_definition')}</label><input class="cc-input" id="cc-def" value="${escapeAttr(c.definition)}"/>
+      <label>${t('card_field_examples')}</label><textarea class="cc-input ex" id="cc-ex" rows="6">${escapeHtml((c.examples||[]).join('\n\n'))}</textarea>
+      <label>${t('card_field_notes')}</label><textarea class="cc-input notes" id="cc-notes" rows="4">${escapeHtml(c.notes||'')}</textarea>
+    </div>
+  `;
+}
+
+function readCardEditor() {
+  const term = document.getElementById('cc-term').value.trim();
+  const reading = (document.getElementById('cc-reading')?.value || '').trim();
+  const ipa = document.getElementById('cc-ipa').value.trim();
+  const pos = document.getElementById('cc-pos').value.trim();
+  const definition = document.getElementById('cc-def').value.trim();
+  const raw = document.getElementById('cc-ex').value;
+  // Split examples by blank lines to keep English+Chinese together
+  const examples = raw
+    .split(/\r?\n\s*\r?\n/) // blocks separated by blank line
+    .map(b => b.replace(/\s+$/,'').replace(/^\s+/,'')).filter(Boolean);
+  const notes = document.getElementById('cc-notes').value.trim();
+  return { term, reading, ipa, pos, definition, examples, notes };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function escapeAttr(s) {
+  return String(s).replace(/["&<>]/g, c => ({'"':'&quot;','&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function formatIpa(s) {
+  if (!s) return '';
+  const t = String(s).trim();
+  return t.replace(/^\/+|\/+$/g, '');
+}
+
+function normalizeLang(code) {
+  if (!code) return 'und';
+  const c = String(code).toLowerCase().replace('_','-');
+  if (c.startsWith('en')) return 'en';
+  if (c.startsWith('zh-cn') || c === 'zh-hans' || c === 'zh') return 'zh_CN';
+  if (c.startsWith('zh-tw') || c === 'zh-hant') return 'zh_TW';
+  if (c.startsWith('ja')) return 'ja';
+  if (c.startsWith('ko')) return 'ko';
+  if (c.startsWith('ru')) return 'ru';
+  if (c.startsWith('fr')) return 'fr';
+  if (c.startsWith('de')) return 'de';
+  if (c.startsWith('es')) return 'es';
+  return c;
+}
+
+function formatPronunciation(raw, captionLang) {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  const clean = formatIpa(v);
+  const lang = normalizeLang(captionLang);
+  // Add slashes for IPA languages; keep raw for zh/ja/ko and unknowns
+  if (lang === 'en' || lang === 'ru' || lang === 'fr' || lang === 'de' || lang === 'es' || lang === 'ko') {
+    return '/' + escapeHtml(clean) + '/';
+  }
+  return escapeHtml(clean);
+}
+
+// For English, show both US/UK if available; otherwise fall back to single ipa.
+function formatPronunciationMeta(card, captionLang) {
+  const lang = normalizeLang(captionLang);
+  if (lang === 'en') {
+    const us = (card.ipa_us || '').trim();
+    const uk = (card.ipa_uk || '').trim();
+    const parts = [];
+    if (us) parts.push('US: ' + '/' + escapeHtml(formatIpa(us)) + '/');
+    if (uk) parts.push('UK: ' + '/' + escapeHtml(formatIpa(uk)) + '/');
+    if (parts.length) return parts.join(' · ');
+    return formatPronunciation(card.ipa || '', captionLang);
+  }
+  if (lang === 'ja' || lang === 'ko' || lang === 'zh_CN' || lang === 'zh_TW') {
+    const reading = (card.reading || '').trim();
+    const term = (card.term || '').trim();
+    if (reading && reading !== term) return escapeHtml(reading);
+  }
+  return formatPronunciation(card.ipa || '', captionLang);
+}
+
+// Enhanced examples renderer supporting pronunciation line for non-English sources
+function renderExamplesQuoteEx(list) {
+  if (!list || !list.length) return '';
+  const lang = normalizeLang(currentState.captionLang);
+  const blocks = list.slice(0, 2).map((raw, i) => {
+    const lines = String(raw).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const l1 = lines[0] || '';
+    const l2 = lines[1] || '';
+    const speak = l1 ? `<button type="button" class="cc-speak cc-speak-sm" data-tts="ex" data-idx="${i}" data-lang="${escapeAttr(lang)}" title="${t('action_speak')}" aria-label="${t('action_speak')}">${SPEAK_ICON}</button>` : '';
+    return `<blockquote><div class="cc-ex-l1"><span class="cc-ex-txt">${escapeHtml(l1)}</span>${speak}</div>${l2 ? `<div class="cc-small">${escapeHtml(l2)}</div>` : ''}</blockquote>`;
+  }).join('');
+  return `<div class="examples-quote">${blocks}</div>`;
+}
+
+// ===== TTS: browser speech synthesis integration =====
+var __ttsPromise = typeof __ttsPromise !== 'undefined' ? __ttsPromise : null;
+var __speakBtn = typeof __speakBtn !== 'undefined' ? __speakBtn : null;
+function ensureTTS() {
+  // tts.js is loaded as a content script (isolated world) via manifest,
+  // so globalThis.CC_TTS is always available here. A dynamic <script> tag would
+  // run in the MAIN world and be invisible to this isolated world, so we do not use it.
+  if (globalThis.CC_TTS) return Promise.resolve(globalThis.CC_TTS);
+  if (__ttsPromise) return __ttsPromise;
+  __ttsPromise = new Promise((resolve) => {
+    try {
+      const s = document.createElement('script');
+      s.src = chrome.runtime.getURL('assets/tts.js');
+      s.onload = () => resolve(globalThis.CC_TTS || null);
+      s.onerror = () => resolve(null);
+      (document.head || document.documentElement).appendChild(s);
+      setTimeout(() => resolve(globalThis.CC_TTS || null), 2000);
+    } catch { resolve(null); }
+  });
+  return __ttsPromise;
+}
+function setSpeakBtn(btn, on) {
+  if (!btn) return;
+  try { btn.classList.toggle('cc-speaking', !!on); } catch {}
+}
+function stopSpeech() {
+  if (globalThis.CC_TTS) { try { globalThis.CC_TTS.stop(); } catch {} }
+  if (__speakBtn) { setSpeakBtn(__speakBtn, false); __speakBtn = null; }
+}
+async function speakFromButton(btn) {
+  await ensureTTS();
+  const tts = globalThis.CC_TTS;
+  if (!tts || !btn) return;
+  const card = (currentState.cards || [])[currentCardIndex] || {};
+  let text = '';
+  if (btn.dataset && btn.dataset.tts === 'term') {
+    text = card.term || '';
+  } else {
+    const ex = (card.examples) || [];
+    const raw = ex[Number((btn.dataset && btn.dataset.idx) || 0)] || '';
+    text = String(raw).split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
+  }
+  if (!text) return;
+  // Toggle off if the same button is already speaking
+  if (tts.isSpeaking() && __speakBtn === btn) {
+    tts.stop(); setSpeakBtn(btn, false); __speakBtn = null; return;
+  }
+  tts.stop();
+  if (__speakBtn && __speakBtn !== btn) setSpeakBtn(__speakBtn, false);
+  __speakBtn = btn;
+  setSpeakBtn(btn, true);
+  try {
+    const settings = await B.getSettings();
+    const accent = (settings && settings.accent) || 'us';
+    const engine = (settings && settings.ttsEngine) || 'edge';
+    await tts.speak(text, {
+      lang: (btn.dataset && btn.dataset.lang) || '',
+      accent,
+      engine,
+      rate: 0.9,
+      onEnd: () => { setSpeakBtn(btn, false); if (__speakBtn === btn) __speakBtn = null; },
+      onError: () => { setSpeakBtn(btn, false); if (__speakBtn === btn) __speakBtn = null; }
+    });
+  } catch {
+    setSpeakBtn(btn, false);
+    if (__speakBtn === btn) __speakBtn = null;
+  }
+}
+function bindCardSpeak(root) {
+  if (!root) return;
+  root.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('[data-tts]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    speakFromButton(btn);
+  });
+}
+
+async function deleteAllForThisVideo() {
+  if (!currentState.videoId) return;
+  await saveState( { subtitlesText: null, candidates: null, selected: null, cards: null, title: currentState.title });
+  currentState = { ...currentState, subtitlesText: null, candidates: null, selected: null, cards: null };
+  startFlow(true);
+}
+
+async function exportCSV() {
+  const cards = currentState.cards || [];
+  if (!cards.length) return;
+  const rows = [['term', 'ipa', 'ipa_us', 'ipa_uk', 'pos', 'definition', 'notes', 'examples']]
+    .concat(cards.map(c => {
+      const examples = (c.examples || []).join('\n\n');
+      return [c.term||'', c.ipa||'', c.ipa_us||'', c.ipa_uk||'', c.pos||'', c.definition||'', c.notes||'', examples];
+    }))
+    .map(r => r.map(cell => '"' + String(cell).replace(/"/g, '""') + '"').join(','))
+    .join('\r\n');
+  const csv = '\ufeff' + rows;
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const safeTitle = (currentState.title || 'export').replace(/[\\/:*?"<>|]/g, '_');
+  a.download = safeTitle + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ===== LLM 调试日志（仅计时上报，不改变任何 LLM 行为）=====
+// 在调用前后把阶段事件推给 background 统一收集；导出时从 background 取全量。
+async function llmCallTimed(role, data) {
+  const t0 = performance.now();
+  try {
+    const ev = { type: 'CC_LLM_DEBUG_EVENT', stage: 'ui.call.start', role, detail: { at: Math.round(performance.now()) } };
+    if (chrome && chrome.runtime && chrome.runtime.sendMessage) chrome.runtime.sendMessage(ev).catch(() => {});
+  } catch (e) {}
+  try {
+    const resp = await B.llmCall(role, data);
+    try {
+      const count = resp && Array.isArray(resp.items) ? resp.items.length : (resp && Array.isArray(resp.cards) ? resp.cards.length : 0);
+      const ev = { type: 'CC_LLM_DEBUG_EVENT', stage: 'ui.call.end', role, detail: { ms: Math.round(performance.now() - t0), ok: true, count } };
+      if (chrome && chrome.runtime && chrome.runtime.sendMessage) chrome.runtime.sendMessage(ev).catch(() => {});
+    } catch (e) {}
+    return resp;
+  } catch (err) {
+    try {
+      const ev = { type: 'CC_LLM_DEBUG_EVENT', stage: 'ui.call.end', role, detail: { ms: Math.round(performance.now() - t0), ok: false, err: String((err && err.message) || err) } };
+      if (chrome && chrome.runtime && chrome.runtime.sendMessage) chrome.runtime.sendMessage(ev).catch(() => {});
+    } catch (e) {}
+    throw err;
+  }
+}
+
+// 导出 LLM 调试日志为 JSON 文件（浮层 FAB 的虫形按钮触发）
+async function exportLLMDebugLog() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'CC_GET_LLM_DEBUG_LOG' });
+    const log = (resp && resp.ok && Array.isArray(resp.log)) ? resp.log : [];
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      app: '捕获生词 LLM 调试日志',
+      note: '记录 LLM 调用全链路：bg.* 为后台各环节耗时（ms），ui.* 为前端发起调用；t 为相对后台启动的毫秒时间戳，同一 seq 相邻事件的 t 差即环节耗时。',
+      log
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    a.download = 'captiprep-llm-debug-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  } catch (e) {
+    console.warn('导出 LLM 调试日志失败', e);
+  }
+}
+
+// Sample a long transcript to a target character budget by uniform line downsampling
+function sampleTranscript(text, targetChars = 12000) {
+  try {
+    if (!text || text.length <= targetChars) return text || '';
+    const lines = String(text).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (!lines.length) return String(text).slice(0, targetChars);
+    // Compute stride to roughly meet budget
+    const avgLen = Math.max(1, Math.floor((text.length / lines.length)));
+    const approxKeep = Math.max(1, Math.floor(targetChars / avgLen));
+    const stride = Math.max(1, Math.ceil(lines.length / approxKeep));
+    const sampled = [];
+    for (let i = 0; i < lines.length; i += stride) sampled.push(lines[i]);
+    // Ensure we at least include head/tail
+    if (sampled[0] !== lines[0]) sampled.unshift(lines[0]);
+    if (sampled[sampled.length - 1] !== lines[lines.length - 1]) sampled.push(lines[lines.length - 1]);
+    let out = sampled.join('\n');
+    if (out.length > targetChars) out = out.slice(0, targetChars);
+    return out;
+  } catch {
+    return String(text || '').slice(0, targetChars);
+  }
+}
+
+// Build brief transcript evidence for each selected term to guide definitions
+function buildContextForSelected(text, selected, captionLang, maxPerTerm = 2) {
+  try {
+    const list = Array.isArray(selected) ? selected : [];
+    const raw = String(text || '');
+    if (!raw || !list.length) return [];
+    const lang = normalizeLang(captionLang);
+    const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const clipAt = (s, idx) => {
+      const start = Math.max(0, idx - 80);
+      const end = Math.min(s.length, idx + 80);
+      const head = start > 0 ? '…' : '';
+      const tail = end < s.length ? '…' : '';
+      return head + s.slice(start, end).replace(/\s+/g, ' ').trim() + tail;
+    };
+    return list.map(it => {
+      const term = String(it && it.term || '').trim();
+      if (!term) return { term, lines: [] };
+      const s = raw;
+      let indexes = [];
+      if (lang === 'ja' || lang === 'ko' || lang === 'zh_CN' || lang === 'zh_TW') {
+        // Substring search over full transcript
+        let pos = 0;
+        const needle = term;
+        while (indexes.length < maxPerTerm) {
+          const i = s.indexOf(needle, pos);
+          if (i === -1) break;
+          indexes.push(i);
+          pos = i + needle.length;
+        }
+      } else {
+        // Unicode-aware boundary search
+        try {
+          const re = new RegExp(`(^|[^\\p{L}\\p{M}\\p{N}'-])${esc(term)}([^\\p{L}\\p{M}\\p{N}'-]|$)`, 'giu');
+          let m;
+          while ((m = re.exec(s))) {
+            indexes.push(m.index + m[0].indexOf(term));
+            if (indexes.length >= maxPerTerm) break;
+          }
+        } catch {
+          // Fallback: case-insensitive indexOf over joined text
+          const hay = s.toLowerCase();
+          const needle = term.toLowerCase();
+          let pos = 0;
+          while (indexes.length < maxPerTerm) {
+            const i = hay.indexOf(needle, pos);
+            if (i === -1) break;
+            indexes.push(i);
+            pos = i + needle.length;
+          }
+        }
+      }
+      const lines = indexes.map(i => clipAt(s, i));
+      return { term, lines };
+    });
+  } catch { return []; }
+}
+
+function renderOnboarding() {
+  const content = uiRoot.querySelector('#cc-content');
+  content.innerHTML = `
+    <div class="cc-card">
+      <div class="cc-setup-title"><b>${t('onboarding_title')}</b></div>
+      <p class="cc-small cc-setup-desc">${t('onboarding_desc')}</p>
+      <div class="cc-controls">
+        <button class="cc-btn-white" id="cc-open-settings">${t('onboarding_open_settings')}</button>
+        <button class="cc-btn-white" id="cc-continue">${t('onboarding_continue')}</button>
+      </div>
+    </div>
+  `;
+  updateBottomControls();
+  content.querySelector('#cc-open-settings')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'CC_OPEN_OPTIONS' }));
+  content.querySelector('#cc-continue')?.addEventListener('click', async () => {
+    const s = await B.getSettings();
+    if (!s.apiKey) {
+      alert(t('alert_missing_api_key'));
+      return;
+    }
+    startFlow(true);
+  });
+}
+
+function pauseActiveVideo() {
+  try {
+    const vids = document.querySelectorAll('video');
+    vids.forEach(v => {
+      try { if (!v.paused) { v.pause(); __ccPausedVideos.add(v); } } catch {}
+    });
+  } catch {}
+}
+function resumePausedVideos() {
+  try { __ccPausedVideos.forEach(v => { try { v.play(); } catch {} }); } catch {}
+  __ccPausedVideos.clear();
+}
+
+function formatDateYYYYMMDD(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+// Favorites storage helpers (word snapshots)
+async function addFavoriteWordSnapshot({ videoId, title, cardIndex, snapshot }) {
+  try {
+    const key = 'CCAPTIPREPS:fav:words';
+    const data = await chrome.storage.local.get(key);
+    const list = Array.isArray(data[key]) ? data[key] : [];
+    const savedAt = new Date().toISOString();
+    const item = { videoId, title, cardIndex, snapshot, savedAt };
+    list.push(item);
+    await chrome.storage.local.set({ [key]: list });
+    return true;
+  } catch (e) { throw e; }
+}
+
+async function toggleFavoriteCurrentCard() {
+  const key = 'CCAPTIPREPS:fav:words';
+  const data = await chrome.storage.local.get(key);
+  let list = Array.isArray(data[key]) ? data[key] : [];
+  const exists = list.some(it => it && it.videoId === currentState.videoId && it.cardIndex === currentCardIndex);
+  if (exists) {
+    list = list.filter(it => !(it && it.videoId === currentState.videoId && it.cardIndex === currentCardIndex));
+    await chrome.storage.local.set({ [key]: list });
+    return false;
+  } else {
+    const snapshot = (currentState.cards || [])[currentCardIndex];
+    const item = { videoId: currentState.videoId, title: currentState.title, cardIndex: currentCardIndex, snapshot, savedAt: new Date().toISOString() };
+    list.push(item);
+    await chrome.storage.local.set({ [key]: list });
+    return true;
+  }
+}
+
+function blurActiveMiniButtons(){
+  try {
+    const active = document.activeElement;
+    if (active && active.classList && active.classList.contains('cc-mini-btn')) active.blur();
+  } catch {}
+}
+
+async function updateFavButtonActive() {
+  try {
+    const btn = uiRoot && uiRoot.querySelector('#cc-b-fav');
+    if (!btn || ccGridMode || !(currentState.cards || []).length) return;
+    const key = 'CCAPTIPREPS:fav:words';
+    const data = await chrome.storage.local.get(key);
+    const list = Array.isArray(data[key]) ? data[key] : [];
+    const isFav = list.some(it => it && it.videoId === currentState.videoId && it.cardIndex === currentCardIndex);
+    btn.classList.toggle('active', !!isFav);
+  } catch {}
+}
+
+// Icons
+function iconClose(){return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>`}
+function iconSettings(){return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 3.3l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .66.26 1.3.73 1.77.47.47 1.11.73 1.77.73h.09a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`}
+function iconArrow(){return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5l7 7-7 7"/></svg>`}
+function iconRefresh(){return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2-9.94"/></svg>`}
+function iconTrash(){return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>`}
+function iconExport(){return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 8 12 3 17 8"/><path d="M21 21H3v-4a4 4 0 0 1 4-4h10a4 4 0  0 1 4 4v4z"/></svg>`}
+function iconGrid(){return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`}
+function iconCard(){return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><line x1="7" y1="10" x2="17" y2="10"/></svg>`}
+function iconLeft(){return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>`}
+function iconRight(){return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>`}
+function iconEdit(){return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>`}
+function iconSave(){return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>`}

@@ -1,0 +1,206 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__MSG_options_title__</title>
+  <style>
+    body { font-family: 'Fredoka','Baloo 2','Segoe UI',ui-rounded,'Comic Sans MS','PingFang SC','Microsoft YaHei',sans-serif; background: linear-gradient(180deg,#FFF8E7 0%,#EAF7FF 100%); color:#3B3B3B; font-size: 15px; }
+    /* Nudge content upward slightly */
+    .wrap { max-width: 920px; margin: 14px auto; padding: 0 12px; }
+    h1 { margin: 0; font-size: 22px; }
+
+    .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom: 6px; }
+    .top-actions { display:flex; align-items:center; gap:12px; }
+    .status-badge { font-size:16px; color:#6B7280; }
+
+    /* Card style aligned with content UI */
+    .card { border:2px solid #E8E4F0; border-radius:16px; box-shadow: 0 6px 18px rgba(90,80,140,.12); background:#fff; margin: 18px 0; overflow:hidden; }
+    /* Slightly larger gap between consecutive cards (Provider & Auth → Models) */
+    .card + .card { margin-top: 26px; }
+    .card-hd { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:2px solid #EAF2FF; background: linear-gradient(90deg,#58CC02 0%,#7BD33E 45%,#3BB2F5 100%); color:#fff; }
+    .card-tt { font-weight: 900; letter-spacing: .4px; white-space: nowrap; color:#fff; }
+    .card-bd { padding: 16px; }
+
+    .row { display:grid; grid-template-columns: 200px 1fr; gap:12px 14px; align-items:center; margin:10px 0; }
+    .row .full { grid-column: 1 / -1; }
+    label { font-weight: 800; }
+    input, select, button { border:2px solid #3BB2F5; border-radius:10px; padding:8px 12px; font: inherit; box-sizing: border-box; transition: border-color .15s ease, box-shadow .15s ease; }
+    input, select, .full-width { width: 100%; }
+    input:focus, select:focus { outline:none; border-color:#58CC02; box-shadow:0 0 0 3px #DDF6D4; }
+    /* Shorter consistent control width */
+    .row input, .row select { max-width: 420px; }
+    /* Provider specific width (~1/6 of 560). Must override width:100% */
+    .w-1-3 { width: 33%; max-width: 140px; min-width: 96px; }
+
+    /* Buttons: white with black shadow (ref cc-btn-white) */
+    .btn-white { background:#fff; color:#2A8AC0; border:2px solid #3BB2F5; border-radius:10px; padding:8px 14px; cursor:pointer; font-weight:700; box-shadow: 0 3px 0 #D6ECFF; transition: transform .14s ease, box-shadow .14s ease, background .14s ease, color .14s ease; }
+    .btn-white:hover { transform: translateY(-2px); box-shadow: 0 5px 12px rgba(59,178,245,.3); background:#D6ECFF; }
+    .btn-white:disabled { opacity:.6; cursor:not-allowed; }
+    /* Icon-only svg toggle */
+    #apiKeyEye { width:22px; height:22px; cursor:pointer; align-self:center; -webkit-tap-highlight-color: transparent; }
+    #apiKeyEye path { fill: currentColor; }
+    #apiKeyEye:focus { outline: none; }
+    #apiKeyEye:focus-visible { outline: none; }
+
+    /* Actions align right without forcing full width to avoid squeezing titles */
+    .actions { display:flex; gap:12px; align-items:center; margin-left:auto; }
+
+    /* Accent choices */
+    .choices { display:flex; gap:12px; align-items:center; }
+    .choice { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border:2px solid #3BB2F5; border-radius:10px; background:#fff; box-shadow: 0 3px 0 #D6ECFF; cursor:pointer; white-space: nowrap; transition: transform .14s ease, box-shadow .14s ease; }
+
+    /* Model input with suggestions */
+    .model-line { display:grid; grid-template-columns: minmax(240px, 420px) max-content; align-items:center; gap:8px; width: 100%; }
+    .model-line .btn-white { width:auto; justify-self:start; }
+    .model-field { position: relative; min-width: 0; }
+    .suggest { position:absolute; left:0; right:0; top: calc(100% + 6px); background:#fff; border:2px solid #E8E4F0; border-radius:10px; box-shadow: 0 8px 20px rgba(90,80,140,.18); max-height: 280px; overflow:auto; z-index: 20; }
+    .suggest .item { padding:8px 10px; cursor:pointer; }
+    .suggest .item:hover, .suggest .item.active { background:#58CC02; color:#fff; }
+
+    @media (max-width: 720px) {
+      .row { grid-template-columns: 1fr; }
+      .model-line { grid-template-columns: 1fr; }
+      .w-1-3 { width: 100%; max-width: 100%; }
+    }
+
+    /* Brand hero at top (smaller to avoid scroll) */
+    .brand-footer { display:flex; justify-content:center; align-items:center; margin: 12px auto 0; }
+    .brand-footer .brand-icon { width: 160px; height: 160px; object-fit: contain; image-rendering: -webkit-optimize-contrast; }
+    @media (min-resolution: 2dppx) {
+      .brand-footer .brand-icon { width: 180px; height: 180px; }
+    }
+  </style>
+  <script defer src="options.js"></script>
+  </head>
+<body>
+  <!-- Brand icon moved to top -->
+  <div class="brand-footer">
+    <img src="../icons/icon-512.png" alt="捕获生词" class="brand-icon" />
+  </div>
+
+  <div class="wrap">
+    <div class="topbar">
+      <h1 data-i18n="options_header">__MSG_options_header__</h1>
+      <div class="top-actions">
+        <span class="status-badge" id="saveStatus"></span>
+        <button class="btn-white" id="save" data-i18n="options_save">__MSG_options_save__</button>
+      </div>
+    </div>
+
+    <!-- Language section moved to the top -->
+    <section class="card">
+      <div class="card-hd">
+        <div class="card-tt" data-i18n="options_section_language">__MSG_options_section_language__</div>
+      </div>
+      <div class="card-bd">
+        <div class="row">
+          <label for="uiLang" data-i18n="options_label_ui_lang">__MSG_options_label_ui_lang__</label>
+          <select id="uiLang" class="w-1-3">
+            <option value="auto" data-i18n="options_ui_lang_auto">__MSG_options_ui_lang_auto__</option>
+            <option value="en" data-i18n="options_ui_lang_en">__MSG_options_ui_lang_en__</option>
+            <option value="zh_CN" data-i18n="options_ui_lang_zh_cn">__MSG_options_ui_lang_zh_cn__</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="glossLang" data-i18n="options_label_gloss">__MSG_options_label_gloss__</label>
+          <select id="glossLang" class="w-1-3">
+            <option value="en" data-i18n="options_gloss_en">__MSG_options_gloss_en__</option>
+            <option value="zh_CN" data-i18n="options_gloss_zh_cn">__MSG_options_gloss_zh_cn__</option>
+            <option value="zh_TW" data-i18n="options_gloss_zh_tw">__MSG_options_gloss_zh_tw__</option>
+            <option value="ja" data-i18n="options_gloss_ja">__MSG_options_gloss_ja__</option>
+            <option value="ko" data-i18n="options_gloss_ko">__MSG_options_gloss_ko__</option>
+            <option value="ru" data-i18n="options_gloss_ru">__MSG_options_gloss_ru__</option>
+            <option value="fr" data-i18n="options_gloss_fr">__MSG_options_gloss_fr__</option>
+            <option value="de" data-i18n="options_gloss_de">__MSG_options_gloss_de__</option>
+            <option value="es" data-i18n="options_gloss_es">__MSG_options_gloss_es__</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="ttsEngine" data-i18n="options_label_tts_engine">__MSG_options_label_tts_engine__</label>
+          <select id="ttsEngine" class="w-1-3">
+            <option value="edge" data-i18n="options_tts_engine_edge">__MSG_options_tts_engine_edge__</option>
+            <option value="system" data-i18n="options_tts_engine_system">__MSG_options_tts_engine_system__</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-hd">
+        <div class="card-tt" data-i18n="options_section_provider">__MSG_options_section_provider__</div>
+      </div>
+      <div class="card-bd">
+        <div class="row">
+          <label for="provider" data-i18n="options_label_provider">__MSG_options_label_provider__</label>
+          <select id="provider" class="w-1-3">
+            <option value="gemini" data-i18n="options_provider_gemini">__MSG_options_provider_gemini__</option>
+            <option value="openai" data-i18n="options_provider_openai">__MSG_options_provider_openai__</option>
+            <option value="anthropic" data-i18n="options_provider_anthropic">__MSG_options_provider_anthropic__</option>
+            <option value="openrouter" data-i18n="options_provider_openrouter">__MSG_options_provider_openrouter__</option>
+            <option value="openai-compatible" data-i18n="options_provider_openai_compatible">__MSG_options_provider_openai_compatible__</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="baseUrl" data-i18n="options_label_base_url">__MSG_options_label_base_url__</label>
+          <input id="baseUrl" placeholder="__MSG_options_placeholder_base_url__" data-i18n-placeholder="options_placeholder_base_url" />
+        </div>
+        <div class="row">
+          <label for="apiKey" data-i18n="options_label_api_key">__MSG_options_label_api_key__</label>
+          <div class="model-line">
+            <div class="model-field">
+              <input id="apiKey" type="password" placeholder="__MSG_options_placeholder_api_key__" data-i18n-placeholder="options_placeholder_api_key" />
+            </div>
+            <!-- Single SVG icon; JS swaps path for open/closed eye -->
+            <svg id="apiKeyEye" viewBox="0 0 24 24" role="button" tabindex="0" aria-label="Show API Key">
+              <path d="M12 5c-5 0-9 4-10 7 1 3 5 7 10 7s9-4 10-7c-1-3-5-7-10-7zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-2.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"></path>
+            </svg>
+          </div>
+        </div>
+        <!-- Accent selection removed: UI now shows both US/UK for English -->
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-hd">
+        <div class="card-tt" data-i18n="options_section_models">__MSG_options_section_models__</div>
+        <div class="actions">
+          <button class="btn-white" id="fetchModels" data-i18n="options_fetch_models">__MSG_options_fetch_models__</button>
+        </div>
+      </div>
+      <div class="card-bd">
+        <div class="row">
+          <label for="modelFirst" data-i18n="options_label_model_first">__MSG_options_label_model_first__</label>
+          <div class="model-line">
+            <div class="model-field">
+              <input id="modelFirst" placeholder="__MSG_options_placeholder_model__" data-i18n-placeholder="options_placeholder_model" />
+              <div class="suggest" id="modelFirstSuggest" hidden></div>
+            </div>
+            <button class="btn-white" id="testFirst" data-i18n="options_test">__MSG_options_test__</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="modelSecond" data-i18n="options_label_model_second">__MSG_options_label_model_second__</label>
+          <div class="model-line">
+            <div class="model-field">
+              <input id="modelSecond" placeholder="__MSG_options_placeholder_model__" data-i18n-placeholder="options_placeholder_model" />
+              <div class="suggest" id="modelSecondSuggest" hidden></div>
+            </div>
+            <button class="btn-white" id="testSecond" data-i18n="options_test">__MSG_options_test__</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="firecrawlKey" data-i18n="options_label_firecrawl_key">__MSG_options_label_firecrawl_key__</label>
+          <div class="model-field">
+            <input id="firecrawlKey" type="password" placeholder="__MSG_options_placeholder_firecrawl_key__" data-i18n-placeholder="options_placeholder_firecrawl_key" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    
+  </div>
+
+  <!-- Removed bottom brand icon to avoid extra height -->
+</body>
+</html>
